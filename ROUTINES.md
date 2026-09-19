@@ -21,20 +21,47 @@ happen too, or when you are on Alexa.
 
 Set this first; both methods hang off it.
 
-Open **Calendar → Prayer times…** and put your masjid's **website** in the
-Masjid box — the ordinary address people visit, like
-`https://centres.macnet.ca/icwaterloo/`. A great many masjid sites publish
-their timetable in a way the clock can read directly, and it takes the
-congregation (iqama) times, not the adhan times.
+Open **Calendar → Prayer times…** and press **Find my masjid…**. Type your
+masjid's name or your town, pick it from the list, and that is the whole
+setup. Nothing to look up and no address to find.
 
-An iqamah **iCal address** works too, if your masjid publishes one. Leave the
-box empty for Waterloo Masjid, which is built in.
+The list comes from two places at once:
 
-The clock keeps a year of times on this machine and checks for changes every
+- **mawaqit.net**, searched live. Several thousand masjids, and the ones it
+  carries come with a whole year of congregation times.
+- **A directory that ships with the clock** — a few hundred Canadian masjids
+  with their addresses and websites. It answers instantly and works with no
+  network, which matters because mawaqit is thin in Canada: four masjids
+  within fifty kilometres of Waterloo against eleven in the city itself.
+
+A masjid from the directory has its times read off its own website, so
+whether they arrive depends on what the masjid publishes. The list says which
+is which, and a masjid with no website at all is shown greyed out rather than
+quietly saved as something that will never work.
+
+### Or paste an address
+
+The **Masjid** box still takes an address directly, and the clock works out
+what it is:
+
+| Paste this | What happens |
+|---|---|
+| `mawaqit.net/en/<masjid>` | a year of congregation times |
+| A masjid's own website | read if it runs the common WordPress prayer-times plugin |
+| `prayersconnect.com/mosques/<masjid>` | today's congregation times |
+| An iqamah iCal address | read as a calendar |
+
+Leave it empty for Waterloo Masjid, which is built in.
+
+The clock keeps what it reads on this machine and checks for changes every
 night at 02:30, catching up within a minute if the machine was off or asleep.
-Any iqama that moves is written to the log and shown on the Prayer page. So it
-stays right through the seasons and through Ramadan without being touched, and
-it still knows today's times with the network down.
+Any iqama that moves is written to the log and shown on the Prayer page. So
+it stays right through the seasons and through Ramadan without being touched.
+
+Mawaqit and the WordPress plugin both hand over a year at a time, so the
+clock still knows today's times with the network down. A PrayersConnect page
+carries today only, so a machine that has been off for a day starts with
+nothing until it has been online a moment.
 
 ---
 

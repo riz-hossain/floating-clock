@@ -15,9 +15,11 @@ run a Qt one. Everything underneath is the same code.
 - **Meetings** — from Outlook on Windows, and on every platform from CalDAV,
   iCal links, and Google or Microsoft sign-in. The next few sit under the
   time; a click joins the call.
-- **Prayer times** — paste your masjid's website and the clock reads its
-  iqama timetable straight off it, keeps a year of it on the machine, and
-  checks nightly for changes.
+- **Prayer times** — press *Find my masjid*, type your town, pick it from the
+  list. Searches mawaqit.net live alongside a directory bundled with the
+  clock, keeps a year of times on the machine, and checks nightly for
+  changes. A masjid's own website, a PrayersConnect page or an iqamah iCal
+  address all work too.
 - **Routines** — at each prayer the clock can call a trigger address (so an
   Alexa routine stops depending on a fixed time) or play your adhan straight
   on a Google or Nest speaker. See [ROUTINES.md](ROUTINES.md).

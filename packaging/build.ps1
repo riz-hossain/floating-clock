@@ -73,6 +73,7 @@ if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
 New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 Copy-Item -Path (Join-Path $repoRoot "*.py") -Destination $packageDir -Force
 Copy-Item -Path (Join-Path $repoRoot "qt") -Destination $packageDir -Recurse -Force
+Copy-Item -Path (Join-Path $repoRoot "data") -Destination $packageDir -Recurse -Force
 Get-ChildItem -Path $packageDir -Recurse -Directory -Filter "__pycache__" |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -113,6 +114,9 @@ $pyArgs = @(
     "--noconfirm", "--clean", "--windowed", $mode,
     "--name", "FloatingClock",
     "--icon", $iconPath,
+    # The bundled masjid directory, so the picker searches with no
+    # network. masjids.py looks under _MEIPASS/data when frozen.
+    "--add-data", ("{0};data" -f (Join-Path $packageDir "data\masjids.json")),
     "--paths", $stageRoot,
     "--distpath", $distDir,
     "--workpath", (Join-Path $buildDir "work"),

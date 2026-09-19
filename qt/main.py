@@ -45,7 +45,7 @@ def _check() -> int:
         from PySide6 import QtWidgets                      # noqa: F401
         from .. import (                                   # noqa: F401
             alerts, cast, caldav, daybar, dpt, google_oauth, hovercard, ics,
-            icon, meetings, orgs, outlook, palette, prayer, providers, render,
+            icon, meetings, orgs, outlook, palette, prayer, prayersconnect, providers, render,
             routines, sounds, themes, timetext, vault,
         )
         from . import bitmapwindow, clock, menu, settings  # noqa: F401

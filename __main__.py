@@ -67,7 +67,7 @@ def _check() -> int:
         from . import (                                    # noqa: F401
             alerts, app, caldav, cast, daybar, dpt, google_oauth, hovercard,
             ics, icon, meetings, orgs, outlook, palette, peek, popupmenu,
-            prayer, providers, render, routines, settings_ui, sounds, themes,
+            prayer, prayersconnect, providers, render, routines, settings_ui, sounds, themes,
             timetext, toast, tray, vault, widgets, win32util,
         )
     except Exception as exc:

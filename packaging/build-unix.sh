@@ -53,6 +53,7 @@ rm -rf "$package_dir"
 mkdir -p "$package_dir"
 cp "$repo_root"/*.py "$package_dir/"
 cp -R "$repo_root/qt" "$package_dir/qt"
+cp -R "$repo_root/data" "$package_dir/data"
 find "$package_dir" -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 echo "[3/5] Generating the icon..."
@@ -111,6 +112,7 @@ fi
   --noconfirm --clean "${extra[@]}" --onedir \
   --name FloatingClock \
   "${icon_arg[@]}" \
+  --add-data "$package_dir/data/masjids.json:data" \
   --paths "$stage_root" \
   --distpath "$dist_dir" \
   --workpath "$build_dir/work" \

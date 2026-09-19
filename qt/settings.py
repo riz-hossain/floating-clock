@@ -18,7 +18,7 @@ import json
 
 from .. import (
     alerts, caldav, cast as cast_mod, google_oauth, ics, orgs as orgs_mod,
-    palette as pal, prayer as prayer_mod, providers, render,
+    masjids as masjids_mod, palette as pal, prayer as prayer_mod, providers, render,
     routines as routines_mod, settings as cfg, themes, vault,
 )
 from ..timetext import parse_clock_time
@@ -356,6 +356,9 @@ class SettingsDialog(QtWidgets.QDialog):
         apply_it = QtWidgets.QPushButton("Apply")
         apply_it.clicked.connect(self._apply_prayer_url)
         row.addWidget(apply_it)
+        find = QtWidgets.QPushButton("Find my masjid\u2026")
+        find.clicked.connect(self._open_masjid_picker)
+        row.addWidget(find)
         g.addLayout(row)
         self._slider(g, "Remind me (minutes before)", "prayer_lead_minutes", 0, 60, 1,
                      lambda v: self.s.__setitem__("prayer_lead_minutes", int(v)))
@@ -475,6 +478,9 @@ class SettingsDialog(QtWidgets.QDialog):
         cfg.save(self.s)
         self.prayer_status.setText("Reading %s…" % (url or prayer_mod.SOURCE_NAME))
         self.clock.refresh_prayers(force=True)
+
+    def _open_masjid_picker(self) -> None:
+        MasjidPicker(self).exec()
 
     def _apply_prayer_url(self) -> None:
         """Apply reads it again even when the address has not changed, so the
@@ -803,6 +809,125 @@ class SettingsDialog(QtWidgets.QDialog):
             self.clock.scheduler.save()
             self._render_timers()
             self.clock.paint(force=True)
+
+
+class MasjidPicker(QtWidgets.QDialog):
+    """Search for a masjid by name or town and pick one from the list.
+
+    The address box still works for anyone who has a link, but nobody should
+    have to go and find one: this looks the masjid up, and knows which of the
+    things it finds can actually supply times.
+    """
+
+    def __init__(self, owner) -> None:
+        super().__init__(owner)
+        self.owner = owner
+        self.rows: list = []
+        self.busy = False
+        self.setWindowTitle("Find your masjid")
+        self.setMinimumSize(560, 460)
+        self.setStyleSheet(owner.styleSheet())
+
+        body = QtWidgets.QVBoxLayout(self)
+        body.setContentsMargins(18, 16, 18, 16)
+
+        heading = QtWidgets.QLabel("Search by name or town")
+        heading.setObjectName("title")
+        body.addWidget(heading)
+
+        note = QtWidgets.QLabel(
+            "Masjids on mawaqit.net come with their congregation times. The "
+            "rest are from a directory that ships with the clock, and their "
+            "times depend on what their own website publishes.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        body.addWidget(note)
+
+        row = QtWidgets.QHBoxLayout()
+        self.box = QtWidgets.QLineEdit()
+        self.box.setPlaceholderText("Waterloo, or your masjid's name")
+        self.box.returnPressed.connect(self.look)
+        row.addWidget(self.box, 1)
+        search = QtWidgets.QPushButton("Search")
+        search.setObjectName("primary")
+        search.clicked.connect(self.look)
+        row.addWidget(search)
+        body.addLayout(row)
+
+        self.listing = QtWidgets.QListWidget()
+        self.listing.itemDoubleClicked.connect(lambda _item: self.use())
+        body.addWidget(self.listing, 1)
+
+        self.status = QtWidgets.QLabel(
+            "Type a town or a masjid's name, then press Search.")
+        self.status.setObjectName("muted")
+        self.status.setWordWrap(True)
+        body.addWidget(self.status)
+
+        buttons = QtWidgets.QHBoxLayout()
+        use = QtWidgets.QPushButton("Use this masjid")
+        use.setObjectName("primary")
+        use.clicked.connect(self.use)
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(use)
+        buttons.addWidget(cancel)
+        buttons.addStretch(1)
+        body.addLayout(buttons)
+
+    def look(self) -> None:
+        text = self.box.text().strip()
+        if not text or self.busy:
+            return
+        self.busy = True
+        self.status.setText("Searching…")
+
+        def work() -> None:
+            try:
+                found, trouble = masjids_mod.search(text)
+            except Exception as exc:        # a search must never crash
+                found, trouble = [], str(exc)[:90] or exc.__class__.__name__
+            QtCore.QTimer.singleShot(0, lambda: self.show_results(found, trouble))
+
+        threading.Thread(target=work, name="floating-clock-masjid-search",
+                         daemon=True).start()
+
+    def show_results(self, found, trouble: str) -> None:
+        self.busy = False
+        self.rows = found
+        self.listing.clear()
+        for entry in found:
+            label = "%s\n    %s" % (entry.get("name") or "",
+                                    masjids_mod.describe(entry))
+            item = QtWidgets.QListWidgetItem(label)
+            if not masjids_mod.address_for(entry):
+                # Nothing to read times from, so it is shown but not inviting.
+                item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
+            self.listing.addItem(item)
+        if trouble:
+            self.status.setText("Found %d. (mawaqit.net: %s)" % (len(found), trouble))
+        elif found:
+            self.status.setText(
+                "Found %d. Pick one, then press Use this masjid." % len(found))
+        else:
+            self.status.setText(
+                "Nothing matched. Try the town instead of the masjid's name.")
+
+    def use(self) -> None:
+        index = self.listing.currentRow()
+        if index < 0 or index >= len(self.rows):
+            self.status.setText("Pick one from the list first.")
+            return
+        entry = self.rows[index]
+        address = masjids_mod.address_for(entry)
+        if not address:
+            self.status.setText(
+                "%s has no website on record, so the clock has nowhere to read "
+                "its times from." % entry.get("name"))
+            return
+        self.owner.prayer_url.setText(address)
+        self.owner._set_prayer_url()
+        self.accept()
 
 
 class AddCalendarDialog(QtWidgets.QDialog):

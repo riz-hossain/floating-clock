@@ -23,7 +23,7 @@ from . import (
     settings as cfg, themes, widgets as w, win32util as w32,
 )
 from . import __version__
-from . import cast as cast_mod, routines as routines_mod
+from . import cast as cast_mod, masjids as masjids_mod, routines as routines_mod
 from .timetext import clock_text, parse_clock_time
 from .calendars_ui import CalendarsPage
 
@@ -809,6 +809,10 @@ class SettingsUI(CalendarsPage):
             slot, ui, "Apply", command=self._set_prayer_url,
             kind="quiet", padx=12, height=28,
         ).pack(side="left", padx=(ui.px(6), 0))
+        w.Button(
+            slot, ui, "Find my masjid\u2026", command=self._open_masjid_picker,
+            kind="quiet", padx=12, height=28,
+        ).pack(side="left", padx=(ui.px(6), 0))
         self.prayer_url_field.entry.bind("<FocusOut>", self._set_prayer_url)
         self.prayer_url_field.entry.bind("<Return>", self._set_prayer_url)
         self._on_close_save(self._set_prayer_url)
@@ -967,6 +971,139 @@ class SettingsUI(CalendarsPage):
         )
         self.cast_status_label.pack(anchor="w", pady=(ui.px(8), 0))
         self._refresh_prayer_page()
+
+    # --- finding a masjid --------------------------------------------------
+    def _open_masjid_picker(self) -> None:
+        """Search for a masjid by name or town and pick one from the list.
+
+        The address box still works for anyone who has a link, but nobody
+        should have to go and find one: this looks the masjid up, and knows
+        which of the things it finds can actually supply times.
+        """
+        ui = self._ui
+        p = ui.p
+        px = ui.px
+        parent = self._settings_win
+        win = tk.Toplevel(parent)
+        win.title("Find your masjid")
+        win.configure(bg=p.window)
+        win.transient(parent)
+        win.attributes("-topmost", True)
+        win.withdraw()
+        win.update_idletasks()
+        w32.set_titlebar(self._toplevel_hwnd(win), dark=p.is_dark,
+                         colour=p.window, text=p.fg)
+
+        frame = tk.Frame(win, bg=p.window)
+        frame.pack(fill="both", expand=True, padx=px(24), pady=(px(18), px(20)))
+
+        w.label(frame, ui, "Search by name or town", 10, "semibold").pack(anchor="w")
+        w.label(
+            frame, ui,
+            "Masjids on mawaqit.net come with their congregation times. The "
+            "rest are from a directory that ships with the clock, and their "
+            "times depend on what their own website publishes.",
+            9, colour=p.muted, wraplength=px(520), justify="left",
+        ).pack(anchor="w", pady=(px(2), px(8)))
+
+        row = tk.Frame(frame, bg=p.window)
+        row.pack(fill="x")
+        box = w.Field(row, ui, width=34, placeholder="Waterloo, or your masjid's name")
+        box.pack(side="left", fill="x", expand=True)
+
+        state: dict = {"rows": [], "busy": False}
+
+        note = w.label(frame, ui, "", 9, colour=p.muted,
+                       wraplength=px(520), justify="left")
+
+        def say(text: str) -> None:
+            if note.winfo_exists():
+                note.configure(text=text)
+
+        listing = w.RowList(frame, ui, empty="Nothing found yet", meta_width=0,
+                            min_height=6)
+
+        def show(found, trouble) -> None:
+            state["busy"] = False
+            state["rows"] = found
+            listing.set_items([
+                w.ListItem(
+                    key=str(index),
+                    primary=str(entry.get("name") or "")[:60],
+                    secondary=masjids_mod.describe(entry),
+                    status="mawaqit" if entry.get("slug") else "",
+                    kind="accent" if entry.get("slug") else "muted",
+                    dim=not masjids_mod.address_for(entry),
+                )
+                for index, entry in enumerate(found)
+            ])
+            if trouble:
+                say("Found %d. (mawaqit.net: %s)" % (len(found), trouble))
+            elif found:
+                say("Found %d. Pick one, then press Use this masjid." % len(found))
+            else:
+                say("Nothing matched. Try the town instead of the masjid's name.")
+
+        def look(_event=None) -> None:
+            text = box.get().strip()
+            if not text or state["busy"]:
+                return
+            state["busy"] = True
+            say("Searching…")
+
+            def work() -> None:
+                try:
+                    found, trouble = masjids_mod.search(text)
+                except Exception as exc:        # a search must never crash
+                    found, trouble = [], str(exc)[:90] or exc.__class__.__name__
+                try:
+                    self.root.after(0, show, found, trouble)
+                except Exception:
+                    state["busy"] = False
+
+            threading.Thread(target=work, name="floating-clock-masjid-search",
+                             daemon=True).start()
+
+        def use() -> None:
+            key = listing.selected_key
+            if key is None:
+                say("Pick one from the list first.")
+                return
+            entry = state["rows"][int(key)]
+            address = masjids_mod.address_for(entry)
+            if not address:
+                say("%s has no website on record, so the clock has nowhere to "
+                    "read its times from." % entry.get("name"))
+                return
+            field = getattr(self, "prayer_url_field", None)
+            if field is not None and field.winfo_exists():
+                field.set(address)
+            self._set_prayer_url()
+            win.destroy()
+
+        box.entry.bind("<Return>", look)
+        w.Button(row, ui, "Search", command=look, kind="primary",
+                 padx=14).pack(side="left", padx=(px(8), 0))
+        listing.pack(fill="both", expand=True, pady=(px(10), 0))
+        listing.on_activate = lambda _key: use()
+        note.pack(anchor="w", pady=(px(8), 0))
+
+        buttons = tk.Frame(frame, bg=p.window)
+        buttons.pack(fill="x", pady=(px(12), 0))
+        w.Button(buttons, ui, "Use this masjid", command=use,
+                 kind="primary", padx=16).pack(side="left")
+        w.Button(buttons, ui, "Cancel", command=win.destroy,
+                 kind="quiet", padx=16).pack(side="left", padx=(px(8), 0))
+
+        win.update_idletasks()
+        win.geometry("+%d+%d" % (
+            parent.winfo_rootx() + max(0, (parent.winfo_width() - win.winfo_width()) // 2),
+            parent.winfo_rooty() + px(60),
+        ))
+        if self.settings_visible:
+            win.deiconify()
+            box.entry.focus_set()
+        say("Type a town or a masjid's name, then press Search.")
 
     # --- routine triggers --------------------------------------------------
     def _routine_same_for_all(self) -> None:
