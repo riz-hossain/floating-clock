@@ -31,6 +31,32 @@ def _configure_logging() -> None:
     )
 
 
+def _check() -> int:
+    """Import everything a real start needs, then say so and exit.
+
+    What a packaged build is smoke-tested with: a bundle missing one lazily
+    imported module looks perfectly fine until someone opens the settings
+    window, and the build that shipped it is long gone by then. --reset is
+    no substitute, since it returns before Qt is ever touched.
+    """
+    from .. import __version__
+
+    try:
+        from PySide6 import QtWidgets                      # noqa: F401
+        from .. import (                                   # noqa: F401
+            alerts, cast, caldav, daybar, dpt, google_oauth, hovercard, ics,
+            icon, meetings, orgs, outlook, palette, prayer, providers, render,
+            routines, sounds, themes, timetext, vault,
+        )
+        from . import bitmapwindow, clock, menu, settings  # noqa: F401
+    except Exception as exc:
+        print("Floating Clock %s is incomplete: %s: %s"
+              % (__version__, exc.__class__.__name__, exc))
+        return 1
+    print("Floating Clock %s (Qt host): every module loaded." % __version__)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     from .. import settings as cfg
 
@@ -38,6 +64,8 @@ def main(argv: list[str]) -> int:
         print(cfg.reset())
         if "--run" not in argv:
             return 0
+    if "--check" in argv:
+        return _check()
     _configure_logging()
 
     from PySide6 import QtCore, QtWidgets

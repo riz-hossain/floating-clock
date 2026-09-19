@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Builds Floating Clock into a standalone Windows executable.
 
@@ -21,8 +21,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$toolsRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\tools
+# $PSScriptRoot rather than $MyInvocation: a pwsh step that dot-sources this
+# script leaves MyCommand.Path null, which stopped the build on its first
+# line with nothing but "Cannot bind argument to parameter 'Path'".
+$here = if ($PSScriptRoot) { $PSScriptRoot }
+        else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$repoRoot = Split-Path -Parent $here
+# PyInstaller has to import the package as `floating_clock`, but the checkout
+# is called floating-clock and a hyphen is not a module name, so the sources
+# are staged under a correctly named folder and that is what goes on the path.
+# This used to point two levels up at a folder that only existed in the old
+# monorepo, which is why a fresh clone could not be built at all.
+$stageRoot = Join-Path $buildDir "pkg"
+$packageDir = Join-Path $stageRoot "floating_clock"
 $buildDir = Join-Path $here "build"
 $distDir = Join-Path $here "dist"
 $iconPath = Join-Path $buildDir "FloatingClock.ico"
@@ -38,15 +49,23 @@ function Get-PythonExe {
 
 $python = Get-PythonExe
 Write-Host "Python:     $python" -ForegroundColor Cyan
-Write-Host "Package:    $toolsRoot\floating_clock" -ForegroundColor Cyan
+Write-Host "Sources:    $repoRoot" -ForegroundColor Cyan
 
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
+New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+Copy-Item -Path (Join-Path $repoRoot "*.py") -Destination $packageDir -Force
+Copy-Item -Path (Join-Path $repoRoot "qt") -Destination $packageDir -Recurse -Force
+Get-ChildItem -Path $packageDir -Recurse -Directory -Filter "__pycache__" |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "`n[1/5] Checking build dependencies..." -ForegroundColor Yellow
-& $python -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('PIL') and u.find_spec('PyInstaller') and u.find_spec('win32com') and u.find_spec('dateutil') else 1)"
+& $python -c "import importlib.util as u, sys; sys.exit(0 if u.find_spec('PIL') and u.find_spec('PyInstaller') and u.find_spec('win32com') and u.find_spec('dateutil') and u.find_spec('pychromecast') else 1)"
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "      Installing Pillow and PyInstaller..." -ForegroundColor DarkGray
-    & $python -m pip install --quiet --upgrade pillow pyinstaller pywin32 python-dateutil
+    Write-Host "      Installing build dependencies..." -ForegroundColor DarkGray
+    # pychromecast is what plays the adhan on a Google or Nest speaker;
+    # without it that one feature says so and the rest still works.
+    & $python -m pip install --quiet --upgrade pillow pyinstaller pywin32 python-dateutil pychromecast
     if ($LASTEXITCODE -ne 0) { throw "Could not install build dependencies." }
 }
 
@@ -54,7 +73,7 @@ Write-Host "[2/5] Generating icon..." -ForegroundColor Yellow
 if ($SkipIcon -and (Test-Path $iconPath)) {
     Write-Host "      Reusing $iconPath" -ForegroundColor DarkGray
 } else {
-    $env:PYTHONPATH = $toolsRoot
+    $env:PYTHONPATH = $stageRoot
     & $python -m floating_clock.icon $iconPath
     if ($LASTEXITCODE -ne 0) { throw "Icon generation failed." }
 }
@@ -77,7 +96,7 @@ $pyArgs = @(
     "--noconfirm", "--clean", "--windowed", $mode,
     "--name", "FloatingClock",
     "--icon", $iconPath,
-    "--paths", $toolsRoot,
+    "--paths", $stageRoot,
     "--distpath", $distDir,
     "--workpath", (Join-Path $buildDir "work"),
     "--specpath", $buildDir,
@@ -91,6 +110,10 @@ $pyArgs = @(
     # cannot see it and the Google feeds would die at runtime without this.
     "--hidden-import", "dateutil.rrule",
     "--hidden-import", "zoneinfo",
+    # Casting to a Nest speaker: pychromecast finds speakers through zeroconf,
+    # and cast.py imports it on use, so PyInstaller cannot see either.
+    "--hidden-import", "pychromecast",
+    "--hidden-import", "zeroconf",
     "--exclude-module", "numpy",
     "--exclude-module", "matplotlib",
     "--exclude-module", "scipy",

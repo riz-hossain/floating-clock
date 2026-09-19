@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import ics
+from . import dpt, ics
 
 log = logging.getLogger(__name__)
 
@@ -122,7 +124,21 @@ def normalise(summary: str) -> str:
 
 
 def parse(text: str, window_start: datetime, window_end: datetime) -> list[Prayer]:
-    """Every iqama in the feed that falls inside the window, in time order."""
+    """Every iqama inside the window, in time order, from either kind of feed.
+
+    The cache holds whatever was fetched, so what it holds says which reader
+    to use: a mosque website's timetable arrives as JSON, a calendar as ICS.
+    Content rather than a saved flag, so a cache left over from the other
+    kind of address cannot be read with the wrong reader.
+    """
+    if text.lstrip()[:1] in ("{", "["):
+        return [Prayer(name=name, iqama=when)
+                for name, when in dpt.parse(text, window_start, window_end)]
+    return parse_ics(text, window_start, window_end)
+
+
+def parse_ics(text: str, window_start: datetime, window_end: datetime) -> list[Prayer]:
+    """Every iqama in an ICS feed that falls inside the window."""
     found: list[Prayer] = []
     try:
         events = ics.to_events(text, window_start, window_end, source="prayer")
@@ -191,16 +207,21 @@ def hook_for(name: str, hooks) -> str:
     return url
 
 
-def hooks_due(prayers, now: datetime, lead_minutes: float, hooks, seen=()) -> list:
-    """(prayer, url) for the routines whose moment has just come.
+def hooks_due(prayers, now: datetime, lead_minutes: float, hooks, seen=(),
+              kind: str = "routine") -> list:
+    """(prayer, value) for the entries whose moment has just come.
 
     A window rather than a threshold: the clock looks every second, but a PC
     that was asleep, or busy, must not fire a routine long after the fact.
+
+    The value is whatever the table holds -- a trigger URL for a routine, a
+    file or address for the speaker -- so one lookup serves both, `kind`
+    only keeping their "already done" marks apart.
     """
     ready = []
     for item in prayers:
         url = hook_for(item.name, hooks)
-        if not url or hook_key(item) in seen:
+        if not url or hook_key(item, kind) in seen:
             continue
         late = (now - (item.iqama - timedelta(minutes=lead_minutes))).total_seconds()
         if 0 <= late <= HOOK_GRACE_S:
@@ -208,8 +229,14 @@ def hooks_due(prayers, now: datetime, lead_minutes: float, hooks, seen=()) -> li
     return ready
 
 
-def hook_key(item) -> str:
-    return "alexa:%s" % item.key
+def hook_key(item, kind: str = "routine") -> str:
+    """Stable per prayer per day per kind, so neither fires twice.
+
+    The prefix keeps a prayer's routine apart from its cast: both are due at
+    their own moment and one must not mark the other as done. prune_keys
+    reads the date off the end, so the prefix is free to say anything.
+    """
+    return "%s:%s" % (kind, item.key)
 
 
 def check_hook(url: str) -> str:
@@ -368,7 +395,7 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
     be reached. `status` is one plain sentence for the settings page."""
     now = now or datetime.now()
     url = (url or "").strip() or WATERLOO_MASJID_ICS
-    fetcher = fetcher or ics.fetch
+    fetcher = fetcher or _fetcher_for(url)
     path = cache_path(base_dir)
     text = _read(path)
     age = age_hours(path)
@@ -397,8 +424,34 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
         return prayers, note
     last = max(prayer.iqama for prayer in prayers)
     return prayers, "%s · updated %s · times through %s." % (
-        SOURCE_NAME, _ago(age or 0.0), last.strftime("%a %d %b"),
+        source_label(url, text), _ago(age or 0.0), last.strftime("%a %d %b"),
     )
+
+
+def _fetcher_for(url: str):
+    """The reader for this address.
+
+    A mosque website is tried as a timetable API first and as a calendar
+    afterwards, because an ICS feed does not always end in .ics -- so the
+    fallback costs one failed probe and saves a confusing error.
+    """
+    if dpt.looks_like_ics(url):
+        return ics.fetch
+
+    def fetch_site(address: str) -> str:
+        try:
+            return dpt.fetch(address)
+        except dpt.DptError:
+            return ics.fetch(address)
+
+    return fetch_site
+
+
+def source_label(url: str, text: str) -> str:
+    """Whose times these are, for the one sentence the settings page shows."""
+    if not (url or "").strip() or url.strip() == WATERLOO_MASJID_ICS:
+        return SOURCE_NAME
+    return dpt.source_name(text) or urllib.parse.urlsplit(url).netloc or SOURCE_NAME
 
 
 def _reason(exc: Exception) -> str:
@@ -457,3 +510,111 @@ def diff(old, new, now: datetime | None = None, days: int = 7) -> list[str]:
                 item.name, item.iqama.strftime("%a %d %b"), was.time_text(), item.time_text(),
             ))
     return changes
+
+
+# How often the loop is even allowed to consider a refresh. The check itself
+# is cheap, but it reads the cache file's timestamp, and once every thirty
+# seconds is plenty for something that happens nightly.
+CHECK_EVERY = timedelta(seconds=30)
+
+
+class Loader:
+    """Keeps the iqama times current, on a worker, for either host.
+
+    Both hosts need the same five things around load(): a read at startup, the
+    nightly check at 02:30, a catch-up within a minute of starting after a
+    night the PC was off or asleep, a retry every few minutes while there are
+    no times at all, and a "fetch it again now" for the settings page.
+
+    A timer is exactly what does not survive a sleep or a bad start, so none
+    of this is on one: poll() is called from the host's own loop and decides
+    for itself whether anything is due.
+
+    All that differs between Tk and Qt is the hop back to the UI thread, which
+    is what `to_ui` is for -- it is handed a callable and must run it there.
+    """
+
+    def __init__(self, settings: dict, base_dir, to_ui, on_ready) -> None:
+        self.s = settings
+        self.base_dir = base_dir          # str, or a callable returning one
+        self.to_ui = to_ui                # to_ui(fn): run fn on the UI thread
+        self.on_ready = on_ready          # on_ready(prayers, status)
+        self.prayers: list = []
+        self.status = ""
+        self.loading = False
+        self.last_try: datetime | None = None
+        self.next_check: datetime | None = None
+
+    def _dir(self) -> str:
+        return self.base_dir() if callable(self.base_dir) else self.base_dir
+
+    # --- the host's entry points -------------------------------------------
+    def start(self) -> None:
+        """Read the times at startup, fetching fresh ones when the saved copy
+        predates last night's check."""
+        stale = refresh_due(datetime.now(), checked_at(self._dir()), None, True)
+        self.refresh(force=stale)
+
+    def poll(self, now: datetime) -> None:
+        """The nightly look at the masjid's calendar, and every catch-up."""
+        if not self.s.get("prayer_enabled", True) or self.loading:
+            return
+        if self.next_check is not None and now < self.next_check:
+            return
+        self.next_check = now + CHECK_EVERY
+        if refresh_due(now, checked_at(self._dir()), self.last_try, bool(self.prayers)):
+            log.info("Checking %s's calendar for changes", SOURCE_NAME)
+            self.refresh(force=True)
+
+    def refresh(self, force: bool = True) -> None:
+        """Read the times on a worker: a feed that is slow, or a masjid whose
+        site is down, must never hold up the clock's own loop."""
+        if not self.s.get("prayer_enabled", True):
+            if self.prayers or self.status:
+                self.prayers, self.status = [], ""
+                self._to_ui(lambda: self.on_ready([], ""))
+            return
+        if self.loading:
+            return
+        self.loading = True
+        self.last_try = datetime.now()
+        url = str(self.s.get("prayer_ics_url", "") or "")
+        base = self._dir()
+
+        def work() -> None:
+            found, status = None, ""
+            try:
+                found, status = load(base, url, force=force)
+            except Exception:
+                log.warning("Could not load the prayer times", exc_info=True)
+            finally:
+                # Always report back, even empty-handed: a load that never
+                # says it has finished would block every later one.
+                if not self._to_ui(lambda: self._done(found, status)):
+                    self.loading = False
+
+        threading.Thread(target=work, name="floating-clock-prayers",
+                         daemon=True).start()
+
+    # --- back on the UI thread ---------------------------------------------
+    def _done(self, found, status: str) -> None:
+        self.loading = False
+        if found is None:
+            return
+        previous = list(self.prayers or ())
+        changes = diff(previous, found) if previous and found else []
+        for line in changes:
+            log.info("Prayer time changed: %s", line)
+        if changes:
+            status = "%s  Changed: %s." % (status, "; ".join(changes[:3]))
+        self.prayers, self.status = found, status
+        log.info("Prayer times: %d loaded -- %s", len(found), status)
+        self.on_ready(found, status)
+
+    def _to_ui(self, fn) -> bool:
+        """True when the UI thread took it; False when the window has gone."""
+        try:
+            self.to_ui(fn)
+            return True
+        except Exception:
+            return False

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build output
+packaging/build/
+packaging/dist/
+build/
+dist/
+*.spec.bak
+
+# macOS / editors
+.DS_Store
+*.swp

@@ -13,6 +13,7 @@ cheap enough that nothing needs to be restyled widget by widget.
 from __future__ import annotations
 
 import logging
+import threading
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -22,6 +23,8 @@ from . import (
     settings as cfg, themes, widgets as w, win32util as w32,
 )
 from . import __version__
+from . import cast as cast_mod, routines as routines_mod
+from .timetext import clock_text, parse_clock_time
 from .calendars_ui import CalendarsPage
 
 log = logging.getLogger(__name__)
@@ -55,17 +58,24 @@ BRAND_SUBTITLE = "Settings  \u00b7  v%s" % __version__
 # exception in the set: its azan follows the sun, and the masjid's iqama is
 # a few minutes after sunset, so firing early against it would call the azan
 # before the sun had actually gone down.
-ALEXA_ROW_NOTES = {
+ROUTINE_ROW_NOTES = {
     "Dhuhr": "Friday's Jumuah uses this one too.",
     "Maghrib": "Best left empty. Maghrib is called at sunset, not at the iqama, so "
-               "Alexa's own sunset trigger is the one to use for it.",
+               "the assistant's own sunset trigger is the one to use for it.",
+}
+# The speaker has the same sunset problem and no sunset trigger to fall back
+# on, so the honest advice differs: give Maghrib its own lead, or leave it out.
+CAST_ROW_NOTES = {
+    "Dhuhr": "Friday's Jumuah uses this one too.",
+    "Maghrib": "Maghrib is called at sunset, a few minutes before the iqama here, so "
+               "playing early against the iqama would call it before sunset.",
 }
 # The mistake that looks like nothing happening at all: the chime rings, the
 # azan does not, because it played at whatever volume the Echo was left on.
 # The wait is what actually fixes it -- setting the volume is not instant, and
 # without a pause the skill starts talking before the new volume has landed.
 ALEXA_ORDER_NOTE = (
-    "Order matters inside the routine: Set volume first, then Wait about 10 seconds, "
+    "For an Alexa routine, order matters inside it: Set volume first, then Wait about 10 seconds, "
     "then the azan. Without that wait the azan starts before the new volume has taken "
     "hold and plays at whatever the Echo was left on overnight -- which sounds exactly "
     "like nothing happening, since the doorbell chime rings on its own volume either "
@@ -86,36 +96,6 @@ HOUR_CHOICES = [_hour_label(h) for h in HOUR_STEPS]
 HOUR_BY_LABEL = {_hour_label(h): h for h in HOUR_STEPS}
 
 
-def parse_clock_time(text: str) -> tuple[int, int] | None:
-    """Accepts '9', '9:05', '0905', '9:05 pm', '21:05'."""
-    text = (text or "").strip().lower().replace(".", ":")
-    if not text:
-        return None
-    meridiem = ""
-    for marker in ("am", "pm"):
-        if text.endswith(marker):
-            meridiem = marker
-            text = text[: -len(marker)].strip()
-            break
-    try:
-        if ":" in text:
-            hour_text, minute_text = text.split(":", 1)
-            hour, minute = int(hour_text), int(minute_text or 0)
-        elif len(text) == 4 and text.isdigit():
-            hour, minute = int(text[:2]), int(text[2:])
-        else:
-            hour, minute = int(text), 0
-    except ValueError:
-        return None
-    if meridiem == "pm" and hour < 12:
-        hour += 12
-    elif meridiem == "am" and hour == 12:
-        hour = 0
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return None
-    return hour, minute
-
-
 def _minutes_label(minutes) -> str:
     """0 -> 'on time'; 90 -> '1 h 30 min'. A slider that reads in hours once
     it is past one saves counting zeroes."""
@@ -126,12 +106,6 @@ def _minutes_label(minutes) -> str:
         return "%d min" % minutes
     hours, rest = divmod(minutes, 60)
     return "%d h" % hours if not rest else "%d h %d min" % (hours, rest)
-
-
-def clock_text(moment: datetime, use_24h: bool) -> str:
-    if use_24h:
-        return moment.strftime("%H:%M")
-    return "%d:%02d %s" % (moment.hour % 12 or 12, moment.minute, "am" if moment.hour < 12 else "pm")
 
 
 class SettingsUI(CalendarsPage):
@@ -821,12 +795,14 @@ class SettingsUI(CalendarsPage):
             self._set_prayer_window, step=5,
         )
         slot = self._control_row(
-            card, "Calendar",
-            "Blank uses %s. Any masjid's iqamah iCal address works." % prayer_mod.SOURCE_NAME,
+            card, "Masjid",
+            "Blank uses %s. Paste your masjid's website and the clock reads its "
+            "timetable straight off it -- an iqamah iCal address works too."
+            % prayer_mod.SOURCE_NAME,
         )
         self.prayer_url_field = w.Field(
             slot, ui, width=34, initial=str(self.s.get("prayer_ics_url", "") or ""),
-            placeholder="Waterloo Masjid",
+            placeholder="your masjid's website, or an iCal address",
         )
         self.prayer_url_field.pack()
         self.prayer_url_field.entry.bind("<FocusOut>", self._set_prayer_url)
@@ -842,61 +818,154 @@ class SettingsUI(CalendarsPage):
         self.prayer_status_label.pack(anchor="w", pady=(ui.px(8), 0))
 
         card = self._card(
-            page, "Alexa routines",
-            "Amazon gives no way to change a routine's time from outside, so the "
-            "routine stops using a time at all. In the Alexa app add a trigger skill "
-            "(URL Routine Trigger is free), make one trigger per prayer, set each "
-            "routine's WHEN to its trigger instead of a clock time, and paste the "
-            "trigger's link here. The clock then calls it at the right moment every "
-            "day, and the times stay right all year.  "
-            "One trigger is usually enough: if the same thing should happen at every "
-            "prayer, make one trigger, point one routine at it, paste its link below "
-            "and press Same for all.",
+            page, "Routine triggers",
+            "No assistant lets you change a routine's time from outside, so the "
+            "routine stops using a time at all. It starts from a plain web address "
+            "instead, and the clock calls that address at the right moment every "
+            "day -- so the times stay right all year.  "
+            "Alexa: add a trigger skill (URL Routine Trigger is free), make one "
+            "trigger per prayer, and set each routine's WHEN to its trigger. "
+            "Google: a Home Assistant webhook or an IFTTT applet ends in the same "
+            "kind of address -- or skip routines entirely and use the speaker card "
+            "below, which needs no account at all.  "
+            "One trigger is usually enough: if the same thing should happen at "
+            "every prayer, paste its link below and press Same for all.",
         )
         w.Button(
-            card.aside, ui, "Same for all", command=self._alexa_same_for_all,
+            card.aside, ui, "Same for all", command=self._routine_same_for_all,
         ).pack(side="left")
         w.Button(
-            card.aside, ui, "How to set this up", command=self._alexa_help,
+            card.aside, ui, "How to set this up", command=self._routine_help,
         ).pack(side="left", padx=(ui.px(8), 0))
-        self.var_alexa = tk.BooleanVar(value=bool(self.s.get("prayer_alexa_enabled", False)))
+        self.var_routines = tk.BooleanVar(
+            value=bool(self.s.get("prayer_routines_enabled", False)))
         self._switch_row(
-            card, "Trigger an Alexa routine at each prayer", self.var_alexa,
-            lambda: self._toggle("prayer_alexa_enabled", self.var_alexa),
+            card, "Call a trigger address at each prayer", self.var_routines,
+            lambda: self._toggle("prayer_routines_enabled", self.var_routines),
         )
-        self.alexa_lead_var = tk.IntVar(value=int(self.s.get("prayer_alexa_lead_minutes", 10)))
+        self.routine_lead_var = tk.IntVar(
+            value=int(self.s.get("prayer_routines_lead_minutes", 10)))
         self._slider_row(
-            card, "Fire this long before iqama", 0, 60, self.alexa_lead_var, _minutes_label,
-            lambda v: self.s.__setitem__("prayer_alexa_lead_minutes", int(v)),
+            card, "Fire this long before iqama", 0, 60, self.routine_lead_var, _minutes_label,
+            lambda v: self.s.__setitem__("prayer_routines_lead_minutes", int(v)),
             caption="The azan is called before the congregation stands, so a routine "
                     "usually wants to run a little ahead of the iqama time.",
         )
-        hooks = self.s.get("prayer_alexa_hooks") or {}
-        self.alexa_fields = {}
+        hooks = self.s.get("prayer_routines_hooks") or {}
+        self.routine_fields = {}
         for name in prayer_mod.DAILY:
-            slot = self._control_row(card, name, ALEXA_ROW_NOTES.get(name, ""))
+            slot = self._control_row(card, name, ROUTINE_ROW_NOTES.get(name, ""))
             field = w.Field(slot, ui, width=26, initial=str(hooks.get(name) or ""),
                             placeholder="https://…")
             field.pack(side="left")
-            self.alexa_fields[name] = field
-            field.entry.bind("<FocusOut>", lambda _e, n=name: self._set_alexa_hook(n))
-            field.entry.bind("<Return>", lambda _e, n=name: self._set_alexa_hook(n))
-            self._on_close_save(lambda n=name: self._set_alexa_hook(n))
+            self.routine_fields[name] = field
+            field.entry.bind("<FocusOut>", lambda _e, n=name: self._set_routine_hook(n))
+            field.entry.bind("<Return>", lambda _e, n=name: self._set_routine_hook(n))
+            self._on_close_save(lambda n=name: self._set_routine_hook(n))
             w.Button(
-                slot, ui, "Test", command=lambda n=name: self._test_alexa(n),
+                slot, ui, "Test", command=lambda n=name: self._test_routine(n),
                 kind="quiet", padx=10, height=28,
             ).pack(side="left", padx=(ui.px(6), 0))
         w.label(
             card.body, ui, ALEXA_ORDER_NOTE, 9, colour=ui.p.muted,
             wraplength=ui.px(520), justify="left",
         ).pack(anchor="w", pady=(ui.px(10), 0))
-        self.alexa_status_label = w.label(
+        self.routine_status_label = w.label(
             card.body, ui, "", 9, colour=ui.p.muted, wraplength=ui.px(520), justify="left",
         )
-        self.alexa_status_label.pack(anchor="w", pady=(ui.px(8), 0))
+        self.routine_status_label.pack(anchor="w", pady=(ui.px(8), 0))
+
+        card = self._card(
+            page, "Google or Nest speaker",
+            "Google Home has no trigger address to point a routine at -- its "
+            "automations start from a time, from the sun, or from a device -- so for "
+            "Google the clock skips the routine and plays the adhan on the speaker "
+            "itself, over your network. Nothing to link, no skill to enable, and the "
+            "volume is set on the same connection as the audio, so it cannot play at "
+            "last night's volume the way an Alexa routine can.  "
+            "The audio is your own file or link: nothing is shipped with the clock. "
+            "The PC has to be awake and on the same network as the speaker.",
+        )
+        w.Button(
+            card.aside, ui, "Find speakers", command=self._find_speakers,
+        ).pack(side="left")
+        self.var_cast = tk.BooleanVar(value=bool(self.s.get("prayer_cast_enabled", False)))
+        self._switch_row(
+            card, "Play the adhan on a speaker at each prayer", self.var_cast,
+            lambda: self._toggle("prayer_cast_enabled", self.var_cast),
+        )
+        slot = self._control_row(
+            card, "Speaker",
+            "The name as it appears in the Google Home app. A speaker group works too.",
+        )
+        self.cast_device_field = w.Field(
+            slot, ui, width=26, initial=str(self.s.get("prayer_cast_device") or ""),
+            placeholder="Kitchen speaker")
+        self.cast_device_field.pack(side="left")
+        self.cast_device_field.entry.bind("<FocusOut>", lambda _e: self._set_cast_device())
+        self.cast_device_field.entry.bind("<Return>", lambda _e: self._set_cast_device())
+        self._on_close_save(self._set_cast_device)
+
+        self.cast_lead_var = tk.IntVar(value=int(self.s.get("prayer_cast_lead_minutes", 10)))
+        self._slider_row(
+            card, "Play this long before iqama", 0, 60, self.cast_lead_var, _minutes_label,
+            lambda v: self.s.__setitem__("prayer_cast_lead_minutes", int(v)),
+        )
+        self.cast_volume_var = tk.IntVar(
+            value=int(round(float(self.s.get("prayer_cast_volume", 0.6)) * 100)))
+        self._slider_row(
+            card, "Speaker volume", 0, 100, self.cast_volume_var, "%d%%",
+            lambda v: self.s.__setitem__("prayer_cast_volume", int(v) / 100.0),
+            caption="Set on the speaker as the adhan starts, and left there afterwards.",
+        )
+
+        slot = self._control_row(
+            card, "Adhan", "Used for every prayer unless one below says otherwise.")
+        self.cast_media_fields = {}
+        field = w.Field(
+            slot, ui, width=22,
+            initial=str(self.s.get("prayer_cast_media_default") or ""),
+            placeholder="a file, or https://…")
+        field.pack(side="left")
+        self.cast_media_fields[""] = field
+        field.entry.bind("<FocusOut>", lambda _e: self._set_cast_media(""))
+        field.entry.bind("<Return>", lambda _e: self._set_cast_media(""))
+        self._on_close_save(lambda: self._set_cast_media(""))
+        w.Button(
+            slot, ui, "Choose…", command=lambda: self._choose_cast_file(""),
+            kind="quiet", padx=10, height=28,
+        ).pack(side="left", padx=(ui.px(6), 0))
+        w.Button(
+            slot, ui, "Test", command=lambda: self._test_cast(""),
+            kind="quiet", padx=10, height=28,
+        ).pack(side="left", padx=(ui.px(6), 0))
+
+        media = self.s.get("prayer_cast_media") or {}
+        for name in prayer_mod.DAILY:
+            slot = self._control_row(card, name, CAST_ROW_NOTES.get(name, ""))
+            field = w.Field(slot, ui, width=22, initial=str(media.get(name) or ""),
+                            placeholder="same as above")
+            field.pack(side="left")
+            self.cast_media_fields[name] = field
+            field.entry.bind("<FocusOut>", lambda _e, n=name: self._set_cast_media(n))
+            field.entry.bind("<Return>", lambda _e, n=name: self._set_cast_media(n))
+            self._on_close_save(lambda n=name: self._set_cast_media(n))
+            w.Button(
+                slot, ui, "Choose…", command=lambda n=name: self._choose_cast_file(n),
+                kind="quiet", padx=10, height=28,
+            ).pack(side="left", padx=(ui.px(6), 0))
+            w.Button(
+                slot, ui, "Test", command=lambda n=name: self._test_cast(n),
+                kind="quiet", padx=10, height=28,
+            ).pack(side="left", padx=(ui.px(6), 0))
+        self.cast_status_label = w.label(
+            card.body, ui, "", 9, colour=ui.p.muted, wraplength=ui.px(520), justify="left",
+        )
+        self.cast_status_label.pack(anchor="w", pady=(ui.px(8), 0))
         self._refresh_prayer_page()
 
-    def _alexa_same_for_all(self) -> None:
+    # --- routine triggers --------------------------------------------------
+    def _routine_same_for_all(self) -> None:
         """Copy the one address that is filled in to every prayer.
 
         The common case by far: the same thing should happen at each prayer --
@@ -905,69 +974,188 @@ class SettingsUI(CalendarsPage):
         an address of its own.
         """
         for name in prayer_mod.DAILY:
-            self._set_alexa_hook(name)
-        hooks = dict(self.s.get("prayer_alexa_hooks") or {})
+            self._set_routine_hook(name)
+        hooks = dict(self.s.get("prayer_routines_hooks") or {})
         url = next((hooks[name] for name in prayer_mod.DAILY if hooks.get(name)), "")
         if not url:
-            self._alexa_note("Paste a trigger link into one of the boxes first.")
+            self._routine_note("Paste a trigger link into one of the boxes first.")
             return
         for name in prayer_mod.DAILY:
             hooks[name] = url
-            field = self.alexa_fields.get(name)
+            field = self.routine_fields.get(name)
             if field is not None and field.winfo_exists():
                 field.set(url)
-        self.s["prayer_alexa_hooks"] = hooks
+        self.s["prayer_routines_hooks"] = hooks
         cfg.save(self.s)
-        self._alexa_note("Every prayer now uses that one trigger.")
+        self._routine_note("Every prayer now uses that one trigger.")
 
-    def _alexa_help(self) -> None:
+    def _routine_help(self) -> None:
         webbrowser.open("https://www.virtualsmarthome.xyz/url_routine_trigger/")
 
-    def _alexa_note(self, text: str) -> None:
-        label = getattr(self, "alexa_status_label", None)
+    def _routine_note(self, text: str) -> None:
+        label = getattr(self, "routine_status_label", None)
         if label is not None and label.winfo_exists():
             label.configure(text=text)
 
-    def _set_alexa_hook(self, name: str) -> None:
+    def _set_routine_hook(self, name: str) -> None:
         """Save one prayer's trigger link, and say so.
 
         Saved to disk the moment it is typed, like a calendar address: an
         upgrade stops the clock with taskkill, and a link retyped from a
         phone screen is not something to lose to that.
         """
-        field = self.alexa_fields.get(name)
+        field = self.routine_fields.get(name)
         if field is None or not field.winfo_exists():
             return
         url = field.get().strip()
         problem = prayer_mod.check_hook(url)
         if problem:
-            self._alexa_note("%s: %s" % (name, problem))
+            self._routine_note("%s: %s" % (name, problem))
             return
-        hooks = dict(self.s.get("prayer_alexa_hooks") or {})
+        hooks = dict(self.s.get("prayer_routines_hooks") or {})
         if url == str(hooks.get(name) or ""):
             return
         if url:
             hooks[name] = url
         else:
             hooks.pop(name, None)
-        self.s["prayer_alexa_hooks"] = hooks
+        self.s["prayer_routines_hooks"] = hooks
         cfg.save(self.s)
-        self._alexa_note(
+        self._routine_note(
             "%s trigger saved." % name if url else "%s trigger cleared." % name)
 
-    def _test_alexa(self, name: str) -> None:
+    def _test_routine(self, name: str) -> None:
         """Fire one routine now, so the wiring can be proved without waiting
         for a prayer."""
-        self._set_alexa_hook(name)
-        url = prayer_mod.hook_for(name, self.s.get("prayer_alexa_hooks") or {})
+        self._set_routine_hook(name)
+        url = prayer_mod.hook_for(name, self.s.get("prayer_routines_hooks") or {})
         if not url:
-            self._alexa_note("Paste %s's trigger link first." % name)
+            self._routine_note("Paste %s's trigger link first." % name)
             return
-        fire = getattr(self, "fire_alexa", None)
+        fire = getattr(self, "fire_routine", None)
         if fire is None:
             return
-        self._alexa_note("Calling %s's trigger…" % name)
+        self._routine_note("Calling %s's trigger…" % name)
         fire(name, url)
+
+    # --- the speaker -------------------------------------------------------
+    def _cast_note(self, text: str) -> None:
+        label = getattr(self, "cast_status_label", None)
+        if label is not None and label.winfo_exists():
+            label.configure(text=text)
+
+    def _set_cast_device(self, _event=None) -> None:
+        field = getattr(self, "cast_device_field", None)
+        if field is None or not field.winfo_exists():
+            return
+        name = field.get().strip()
+        if name == str(self.s.get("prayer_cast_device") or ""):
+            return
+        self.s["prayer_cast_device"] = name
+        cfg.save(self.s)
+        self._cast_note("Speaker saved." if name else "Speaker cleared.")
+
+    def _find_speakers(self) -> None:
+        """List what is on the network, so the name need not be typed blind.
+
+        On a worker: discovery listens for several seconds, and the settings
+        window must not freeze while it does.
+        """
+        problem = cast_mod.available()
+        if problem:
+            self._cast_note(problem)
+            return
+        self._cast_note("Looking for speakers…")
+
+        def work() -> None:
+            names, trouble = cast_mod.discover()
+            def show() -> None:
+                if trouble:
+                    self._cast_note("Could not look: %s" % trouble)
+                elif not names:
+                    self._cast_note(
+                        "No speakers answered. They have to be on the same network "
+                        "as this PC, and switched on.")
+                else:
+                    field = getattr(self, "cast_device_field", None)
+                    if len(names) == 1 and field is not None and field.winfo_exists() \
+                            and not field.get().strip():
+                        field.set(names[0])
+                        self._set_cast_device()
+                    self._cast_note("Found: %s." % ", ".join(names))
+            try:
+                self.root.after(0, show)
+            except Exception:
+                pass
+
+        threading.Thread(target=work, name="floating-clock-cast-find",
+                         daemon=True).start()
+
+    def _cast_field(self, name: str):
+        return (getattr(self, "cast_media_fields", None) or {}).get(name)
+
+    def _set_cast_media(self, name: str) -> None:
+        """Save one prayer's adhan -- or, for "", the one every prayer uses."""
+        field = self._cast_field(name)
+        if field is None or not field.winfo_exists():
+            return
+        media = field.get().strip()
+        if media:
+            problem = cast_mod.check_media(media)
+            if problem:
+                self._cast_note("%s: %s" % (name or "Adhan", problem))
+                return
+        if not name:
+            if media == str(self.s.get("prayer_cast_media_default") or ""):
+                return
+            self.s["prayer_cast_media_default"] = media
+        else:
+            table = dict(self.s.get("prayer_cast_media") or {})
+            if media == str(table.get(name) or ""):
+                return
+            if media:
+                table[name] = media
+            else:
+                table.pop(name, None)
+            self.s["prayer_cast_media"] = table
+        cfg.save(self.s)
+        self._cast_note(
+            "%s adhan saved." % (name or "Default") if media
+            else "%s adhan cleared." % (name or "Default"))
+
+    def _choose_cast_file(self, name: str) -> None:
+        from tkinter import filedialog
+
+        chosen = filedialog.askopenfilename(
+            parent=self._settings_win,
+            title="Choose the adhan to play" if not name else "Choose %s's adhan" % name,
+            filetypes=[("Audio", "*.mp3 *.m4a *.aac *.wav *.ogg *.flac"),
+                       ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+        field = self._cast_field(name)
+        if field is not None and field.winfo_exists():
+            field.set(chosen)
+            self._set_cast_media(name)
+
+    def _test_cast(self, name: str) -> None:
+        """Play it now, so the speaker and the file can be proved together."""
+        self._set_cast_media(name)
+        self._set_cast_device()
+        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s))
+                 if name else str(self.s.get("prayer_cast_media_default") or "").strip())
+        if not media:
+            self._cast_note("Choose the audio first.")
+            return
+        if not str(self.s.get("prayer_cast_device") or "").strip():
+            self._cast_note("Name the speaker first, or press Find speakers.")
+            return
+        fire = getattr(self, "fire_cast", None)
+        if fire is None:
+            return
+        self._cast_note("Starting on %s…" % self.s["prayer_cast_device"])
+        fire(name or "Adhan", media)
 
     def _toggle_prayer(self) -> None:
         self.s["prayer_enabled"] = bool(self.var_prayer.get())
@@ -1031,19 +1219,38 @@ class SettingsUI(CalendarsPage):
             if not self.s.get("prayer_enabled", True):
                 status = "Switch this on to read %s's iqamah calendar." % prayer_mod.SOURCE_NAME
             label.configure(text=status or "Reading the calendar…")
-        alexa = getattr(self, "alexa_status_label", None)
-        if alexa is not None and alexa.winfo_exists() and not alexa.cget("text"):
-            self._alexa_note(getattr(self, "prayer_alexa_status", "") or self._alexa_summary())
+        status = getattr(getattr(self, "routines", None), "status", {}) or {}
+        label = getattr(self, "routine_status_label", None)
+        if label is not None and label.winfo_exists() and not label.cget("text"):
+            self._routine_note(status.get(routines_mod.HOOK) or self._routine_summary())
+        label = getattr(self, "cast_status_label", None)
+        if label is not None and label.winfo_exists() and not label.cget("text"):
+            self._cast_note(status.get(routines_mod.CAST) or self._cast_summary())
 
-    def _alexa_summary(self) -> str:
-        """What the Alexa card says before anything has fired."""
-        hooks = self.s.get("prayer_alexa_hooks") or {}
+    def _routine_summary(self) -> str:
+        """What the routines card says before anything has fired."""
+        hooks = self.s.get("prayer_routines_hooks") or {}
         set_up = [name for name in prayer_mod.DAILY if hooks.get(name)]
         if not set_up:
             return "No triggers yet."
-        if not self.s.get("prayer_alexa_enabled", False):
+        if not self.s.get("prayer_routines_enabled", False):
             return "%d trigger(s) saved, switched off." % len(set_up)
         return "Ready: %s." % ", ".join(set_up)
+
+    def _cast_summary(self) -> str:
+        """What the speaker card says before anything has played."""
+        problem = cast_mod.available()
+        if problem:
+            return problem
+        device = str(self.s.get("prayer_cast_device") or "").strip()
+        table = routines_mod.media_table(self.s)
+        if not device:
+            return "No speaker chosen."
+        if not table:
+            return "No adhan chosen."
+        if not self.s.get("prayer_cast_enabled", False):
+            return "%s is set up, switched off." % device
+        return "Ready: %s on %s." % (", ".join(sorted(table)), device)
 
     def refresh_prayers(self, force: bool = True) -> None:
         """Hook for app.py (re-reads the masjid's calendar)."""

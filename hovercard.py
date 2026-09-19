@@ -6,14 +6,19 @@ sits just above the marker, not under the pointer, so hovering it cannot make
 the clock think the mouse has left.
 
 The drawing is a plain function, render_card, so the Qt host can show the
-same card in its own window.
+same card in its own window. Tk is imported inside HoverCard rather than up
+here for the same reason: the Qt host borrows the drawing and must not need
+Tk installed to get it.
 """
 
 from __future__ import annotations
 
-import tkinter as tk
+from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw, ImageFilter
+
+if TYPE_CHECKING:
+    import tkinter as tk
 
 from . import render, themes, win32util as w32
 
@@ -83,7 +88,9 @@ def render_card(theme, scale: float, title: str, lines, colour=None) -> Image.Im
 class HoverCard:
     """The Windows window that shows render_card's picture."""
 
-    def __init__(self, parent: tk.Tk, theme_name: str, scale: float) -> None:
+    def __init__(self, parent: "tk.Tk", theme_name: str, scale: float) -> None:
+        import tkinter as tk
+
         self.theme = themes.get(theme_name)
         self.scale = scale
         self._key = None
@@ -135,6 +142,8 @@ class HoverCard:
         w32.push_layered_bitmap(self.hwnd, render.to_premultiplied_bgra(self._image), 1.0)
 
     def hide(self) -> None:
+        import tkinter as tk
+
         if self.visible:
             self.visible = False
             try:
@@ -143,6 +152,8 @@ class HoverCard:
                 pass
 
     def destroy(self) -> None:
+        import tkinter as tk
+
         try:
             self.win.destroy()
         except tk.TclError:

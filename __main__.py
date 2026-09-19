@@ -57,11 +57,34 @@ def _wait_for_exit(pid: int, timeout_s: float = 30.0) -> None:
         return
 
 
+def _check() -> int:
+    """Import everything a real start needs, then say so and exit.
+
+    What a packaged build is smoke-tested with: a bundle missing one lazily
+    imported module looks fine until someone opens the settings window.
+    """
+    try:
+        from . import (                                    # noqa: F401
+            alerts, app, caldav, cast, daybar, dpt, google_oauth, hovercard,
+            ics, icon, meetings, orgs, outlook, palette, peek, popupmenu,
+            prayer, providers, render, routines, settings_ui, sounds, themes,
+            timetext, toast, tray, vault, widgets, win32util,
+        )
+    except Exception as exc:
+        print("Floating Clock %s is incomplete: %s: %s"
+              % (__version__, exc.__class__.__name__, exc))
+        return 1
+    print("Floating Clock %s: every module loaded." % __version__)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if "--reset" in argv:
         print(cfg.reset())
         if "--run" not in argv:
             return 0
+    if "--check" in argv:
+        return _check()
     if sys.platform != "win32":
         print("Floating Clock targets Windows: it needs the Win32 layered-window API.")
         return 2
