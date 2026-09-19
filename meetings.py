@@ -5,17 +5,24 @@ Opened by clicking the calendar glyph on the clock card. Drawn the same way as
 the card and the alert toast -- Pillow into a layered window -- so the three
 read as one product, which also means every clickable row is a rectangle we
 hit-test ourselves rather than a widget.
+
+Everything above MeetingsPanel is plain layout the Qt host reuses, so Tk is
+imported inside the panel rather than up here: a Mac build ships Qt alone.
 """
 
 from __future__ import annotations
 
-import tkinter as tk
 import webbrowser
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
+if TYPE_CHECKING:
+    import tkinter as tk
+
 from . import outlook, prayer as prayer_mod, render, themes, win32util as w32
+from .timetext import clock_text
 
 WIDTH = 420
 # The prayer column, added to the panel's width only when there are times to
@@ -97,21 +104,6 @@ def row_status(event, now: datetime, past: bool) -> str:
     if event.is_live(now):
         return "now"
     return outlook.describe_gap(event.minutes_until(now))
-
-
-def clock_text(moment: datetime, use_24h: bool, today=None) -> str:
-    """Time of day, prefixed with the weekday when it is not today's.
-
-    Ten meetings ahead can run into next week, and a bare "9:00 am" three
-    rows down would read as this morning.
-    """
-    if use_24h:
-        text = moment.strftime("%H:%M")
-    else:
-        text = moment.strftime("%I:%M %p").lstrip("0").lower()
-    if today is not None and moment.date() != today:
-        return "%s %s" % (moment.strftime("%a"), text)
-    return text
 
 
 def _ellipsise(font, text: str, max_width: float) -> str:
@@ -260,9 +252,11 @@ class MeetingsPanel:
     otherwise freeze at whatever they were when it was opened.
     """
 
-    def __init__(self, parent: tk.Tk, provider, settings: dict, scale: float,
+    def __init__(self, parent: "tk.Tk", provider, settings: dict, scale: float,
                  on_close, anchor, org_lookup=None, label_lookup=None,
                  calendar_lookup=None, prayers_provider=None) -> None:
+        import tkinter as tk
+
         self.provider = provider        # () -> (list[outlook.Event], error str)
         self.prayers_provider = prayers_provider   # () -> list[prayer.Prayer]
         # source id -> (mark image or None, colour, initials); None when the
@@ -307,6 +301,8 @@ class MeetingsPanel:
     # --- drawing -----------------------------------------------------------
     def refresh(self) -> None:
         """Redraw from the current events and re-arm the next redraw."""
+        import tkinter as tk
+
         if self._closed:
             return
         if self._timer is not None:
@@ -735,6 +731,8 @@ class MeetingsPanel:
                 return
 
     def close(self) -> None:
+        import tkinter as tk
+
         if self._closed:
             return
         self._closed = True

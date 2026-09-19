@@ -63,13 +63,26 @@ DEFAULTS: dict = {
     "prayer_lead_minutes": 5,
     "prayer_ics_url": "",
     "prayer_show_minutes": 60,
-    # Alexa has no API for editing a routine, so the clock fires a trigger
-    # URL instead: the routine's "when" becomes that trigger rather than a
-    # time, and it stays right all year. One URL per prayer; see
-    # ALEXA-ROUTINES.md.
-    "prayer_alexa_enabled": False,
-    "prayer_alexa_lead_minutes": 10,
-    "prayer_alexa_hooks": {},
+    # No assistant lets you edit a routine's time from outside, so the clock
+    # fires a trigger URL instead: the routine's "when" becomes that trigger
+    # rather than a time, and it stays right all year. One URL per prayer.
+    # Alexa reaches these through a trigger skill, Google through Home
+    # Assistant or IFTTT; the clock only opens an address. See
+    # ROUTINES.md.
+    "prayer_routines_enabled": False,
+    "prayer_routines_lead_minutes": 10,
+    "prayer_routines_hooks": {},
+    # Google Home has no webhook starter at all, so for Google the clock skips
+    # routines and plays the adhan on the speaker itself over the network
+    # (cast.py). The audio is the user's own file or URL -- nothing is
+    # shipped or licensed, the same rule sounds.py follows. One default for
+    # every prayer, overridable per prayer because Fajr's adhan differs.
+    "prayer_cast_enabled": False,
+    "prayer_cast_device": "",
+    "prayer_cast_volume": 0.6,
+    "prayer_cast_lead_minutes": 10,
+    "prayer_cast_media_default": "",
+    "prayer_cast_media": {},
     # Progress bar: "day" spans 24h from day_start_hour and dots each meeting,
     # "meeting" fills toward the next one, "seconds" tracks the passing minute.
     "bar_mode": "day",
@@ -184,10 +197,35 @@ def load() -> dict:
     else:
         LOAD_FAILED = False
         data.update({k: v for k, v in saved.items() if k in DEFAULTS})
+        # The trigger URLs were "Alexa" until Google joined them and the
+        # feature turned out to be assistant-agnostic all along. Carry the
+        # old names over: load() keeps only keys in DEFAULTS, so a settings
+        # file written before the rename would otherwise lose every URL.
+        _carry_over(saved, data)
     # Never restore click-through: it makes the window ignore the mouse, so a
     # restart has to be a guaranteed way back regardless of what was saved.
     data["click_through"] = False
     return sanitise(data)
+
+
+# old key -> new key, for settings files written before the rename.
+_RENAMED = {
+    "prayer_alexa_enabled": "prayer_routines_enabled",
+    "prayer_alexa_lead_minutes": "prayer_routines_lead_minutes",
+    "prayer_alexa_hooks": "prayer_routines_hooks",
+}
+
+
+def _carry_over(saved: dict, data: dict) -> None:
+    """Fill new keys from their old names, when the file predates the rename.
+
+    Only when the file has nothing under the new name: someone who has
+    already saved once since upgrading should not have a stale Alexa key
+    overwrite what they set.
+    """
+    for old, new in _RENAMED.items():
+        if old in saved and new not in saved:
+            data[new] = saved[old]
 
 
 def sanitise(data: dict) -> dict:
@@ -204,7 +242,8 @@ def sanitise(data: dict) -> dict:
         "click_through", "topmost", "hover_boost", "lock_position",
         "minimized", "compact", "calendar_enabled", "show_next_meeting", "alerts_sound", "show_timer",
         "peek_enabled", "peek_sound", "show_org_marks", "auto_org_marks",
-        "nudge_enabled", "prayer_enabled", "prayer_alexa_enabled",
+        "nudge_enabled", "prayer_enabled", "prayer_routines_enabled",
+        "prayer_cast_enabled",
     ):
         data[key] = bool(data[key])
     try:
@@ -219,8 +258,11 @@ def sanitise(data: dict) -> dict:
         data["nudge_shake_seconds"] = min(30.0, max(0.5, float(data["nudge_shake_seconds"])))
         data["prayer_lead_minutes"] = min(60, max(0, int(data["prayer_lead_minutes"])))
         data["prayer_show_minutes"] = min(720, max(0, int(data["prayer_show_minutes"])))
-        data["prayer_alexa_lead_minutes"] = min(
-            60, max(0, int(data["prayer_alexa_lead_minutes"])))
+        data["prayer_routines_lead_minutes"] = min(
+            60, max(0, int(data["prayer_routines_lead_minutes"])))
+        data["prayer_cast_lead_minutes"] = min(
+            60, max(0, int(data["prayer_cast_lead_minutes"])))
+        data["prayer_cast_volume"] = min(1.0, max(0.0, float(data["prayer_cast_volume"])))
         # Quarter-hour resolution: enough for "my day ends at 11:30pm"
         # without pretending the boundary is precise to the minute.
         for key in ("day_start_hour", "day_end_hour"):
@@ -231,28 +273,31 @@ def sanitise(data: dict) -> dict:
                     "peek_travel_ms", "day_start_hour", "day_end_hour",
                     "nudge_lead_minutes", "nudge_shake_seconds",
                     "prayer_lead_minutes", "prayer_show_minutes",
-                    "prayer_alexa_lead_minutes"):
+                    "prayer_routines_lead_minutes", "prayer_cast_lead_minutes",
+                    "prayer_cast_volume"):
             data[key] = DEFAULTS[key]
     if not isinstance(data["font_family"], str):
         data["font_family"] = DEFAULTS["font_family"]
     if not isinstance(data["theme"], str):
         data["theme"] = DEFAULTS["theme"]
-    for key in ("google_client_id", "google_client_secret", "prayer_ics_url"):
+    for key in ("google_client_id", "google_client_secret", "prayer_ics_url",
+                "prayer_cast_device", "prayer_cast_media_default"):
         data[key] = str(data.get(key) or "").strip()
     if data["ui_mode"] not in ("auto", "dark", "light"):
         data["ui_mode"] = DEFAULTS["ui_mode"]
     if data["bar_mode"] not in ("day", "meeting", "seconds"):
         data["bar_mode"] = DEFAULTS["bar_mode"]
-    # One trigger URL per prayer, and nothing else: a hand-edited file must
-    # not put a stray key or a number in front of the firing code.
+    # One entry per prayer, and nothing else: a hand-edited file must not put
+    # a stray key or a number in front of the firing code.
     from .prayer import ORDER as PRAYER_NAMES
 
-    hooks = data.get("prayer_alexa_hooks")
-    data["prayer_alexa_hooks"] = {
-        name: str(hooks[name]).strip()
-        for name in PRAYER_NAMES
-        if isinstance(hooks, dict) and str(hooks.get(name) or "").strip()
-    } if isinstance(hooks, dict) else {}
+    for key in ("prayer_routines_hooks", "prayer_cast_media"):
+        table = data.get(key)
+        data[key] = {
+            name: str(table[name]).strip()
+            for name in PRAYER_NAMES
+            if isinstance(table, dict) and str(table.get(name) or "").strip()
+        } if isinstance(table, dict) else {}
     if not isinstance(data["calendars"], list):
         data["calendars"] = []
     else:

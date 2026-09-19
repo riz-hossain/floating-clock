@@ -1,0 +1,116 @@
+name: Build
+
+# Every push builds all three platforms and leaves them under the run's
+# Artifacts. Pushing a tag like v1.9.6 also publishes them as a Release, which
+# is what winget and the Microsoft Store point at.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14      # Apple silicon
+            label: arm64
+          - runner: macos-13      # Intel
+            label: intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the app and a disk image
+        run: bash packaging/build-unix.sh --dmg
+      - name: Check the bundle is complete
+        # --check imports everything a real start needs and exits. A bundle
+        # missing one lazily imported module looks perfectly fine until
+        # someone opens the settings window, and by then the build that
+        # shipped it is long gone. Offscreen, so the runner needs no display.
+        run: QT_QPA_PLATFORM=offscreen ./packaging/dist/FloatingClock.app/Contents/MacOS/FloatingClock --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FloatingClock-macos-${{ matrix.label }}
+          path: packaging/dist/*.dmg
+          if-no-files-found: error
+
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libdbus-1-3
+      - name: Build
+        run: bash packaging/build-unix.sh --tgz
+      - name: Check the bundle is complete
+        run: QT_QPA_PLATFORM=offscreen ./packaging/dist/FloatingClock/FloatingClock --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FloatingClock-linux-x86_64
+          path: packaging/dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build the app and the installer
+        shell: pwsh
+        run: ./packaging/build.ps1
+      - name: Check the bundle is complete
+        shell: pwsh
+        run: ./packaging/dist/FloatingClock/FloatingClock.exe --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FloatingClock-windows-setup
+          path: packaging/dist/FloatingClock-Setup-*.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [macos, linux, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          # Said plainly on the release rather than discovered at first launch.
+          body: |
+            Downloads below. Neither build is signed yet, so the first launch
+            needs one extra step:
+
+            - **macOS** - right-click the app in Applications, choose **Open**,
+              then **Open** again. Once only.
+            - **Windows** - SmartScreen will warn; choose **More info** then
+              **Run anyway**. Once only.

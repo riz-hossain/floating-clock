@@ -19,10 +19,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from .. import (
     alerts, daybar, hovercard, icon as icon_mod, meetings as meetings_mod,
-    orgs as orgs_mod, outlook, render, settings as cfg, sounds, themes,
+    orgs as orgs_mod, outlook, prayer as prayer_mod, render,
+    routines as routines_mod, settings as cfg, sounds, themes,
 )
-from ..app import _span
-from ..settings_ui import clock_text
+from ..timetext import clock_text, span as _span
 from . import bitmapwindow as bw
 from .bitmapwindow import BitmapWindow
 
@@ -237,6 +237,16 @@ class QtClock:
         self._snoozed: list = []
         self._marks_tried: set = set()
         self._work_end = 1.0
+        self._prayer_notified: set = set()
+        # The masjid's times, and what their moments set off. Both are shared
+        # with the Windows host; all this one supplies is the hop back to the
+        # UI thread, which on Qt is a zero-delay single-shot timer.
+        self.prayer_loader = prayer_mod.Loader(
+            self.s, cfg.config_dir,
+            to_ui=lambda fn: QtCore.QTimer.singleShot(0, fn),
+            on_ready=self._prayers_ready,
+        )
+        self.routines = routines_mod.Runner(self.s, on_status=self._routine_status)
 
         self.card = CardWindow(self)
         self.scale = self.card.devicePixelRatio() if self.card.devicePixelRatio() else 1.0
@@ -254,6 +264,7 @@ class QtClock:
 
     # --- lifecycle -----------------------------------------------------------
     def start(self) -> None:
+        self.prayer_loader.start()
         self.paint(force=True)
         self._restore_position()
         self.card.show()
@@ -326,9 +337,32 @@ class QtClock:
                 else:
                     active.append("meeting")
                     lines.extend(self._meeting_line(e, now) for e in ahead)
+        prayer_line = self._prayer_line(now)
+        if prayer_line and len(lines) <= CARD_MEETINGS:
+            lines.append(prayer_line)
         if self.s["compact"]:
             lines = lines[:1]
         return tuple(icons), tuple(active), tuple(lines)
+
+    def _prayer_line(self, now: datetime) -> str:
+        """The next iqama, once it is close enough to be worth a line.
+
+        Far off it would only take space from the meetings; inside the hour
+        it is the next thing that will actually move you.
+        """
+        prayers = self.prayer_loader.prayers
+        if not self.s.get("prayer_enabled", True) or not prayers:
+            return ""
+        item = prayer_mod.next_prayer(prayers, now)
+        if item is None:
+            return ""
+        minutes = item.minutes_until(now)
+        if minutes > float(self.s.get("prayer_show_minutes", 60)):
+            return ""
+        stamp = item.iqama.strftime(
+            "%H:%M" if self.s["use_24h"] else "%I:%M").lstrip("0")
+        return "%s  %s  %s IQAMA" % (
+            stamp, outlook.describe_gap(minutes).upper(), item.name.upper())
 
     def _meeting_line(self, event, now: datetime) -> str:
         stamp = event.start.strftime("%H:%M" if self.s["use_24h"] else "%I:%M").lstrip("0")
@@ -712,7 +746,70 @@ class QtClock:
             else:
                 waiting.append((due_at, fired))
         self._snoozed = waiting
+        self._poll_prayer_alerts(now)
+        self.routines.poll(self.prayer_loader.prayers, now)
+        self.prayer_loader.poll(now)
         self.scheduler.forget_old_notifications()
+
+    # --- prayer times ----------------------------------------------------------
+    def _prayers_ready(self, found: list, status: str) -> None:
+        self.paint(force=True)
+        dialog = self.settings_dialog
+        if dialog is not None:
+            try:
+                dialog.refresh_prayer_page()
+            except Exception:
+                log.debug("could not refresh the prayer page", exc_info=True)
+
+    def refresh_prayers(self, force: bool = True) -> None:
+        """Settings page hook: fetch the calendar again now."""
+        self.prayer_loader.refresh(force=force)
+
+    @property
+    def prayers(self) -> list:
+        return self.prayer_loader.prayers
+
+    @property
+    def prayer_status(self) -> str:
+        return self.prayer_loader.status
+
+    def _poll_prayer_alerts(self, now: datetime) -> None:
+        """A notification the set number of minutes before each iqama."""
+        prayers = self.prayer_loader.prayers
+        if not self.s.get("prayer_enabled", True) or not prayers:
+            return
+        lead = float(self.s.get("prayer_lead_minutes", 5))
+        for item in prayer_mod.due(prayers, now, lead, self._prayer_notified):
+            self._prayer_notified.add(item.key)
+            minutes = item.minutes_until(now)
+            self._notify(alerts.Fired(
+                kind="prayer",
+                title="%s iqama" % item.name,
+                detail="%s · %s · %s" % (
+                    item.time_text(bool(self.s["use_24h"])),
+                    "now" if minutes < 1 else "in %d min" % round(minutes),
+                    prayer_mod.SOURCE_NAME,
+                ),
+                key=item.key,
+            ))
+        if len(self._prayer_notified) > 60:
+            self._prayer_notified = prayer_mod.prune_keys(self._prayer_notified, now)
+
+    def _routine_status(self, kind: str, text: str) -> None:
+        """A worker has something to report; show it on the settings page.
+
+        The Runner is host-neutral and knows nothing about Qt, so getting
+        back to the UI thread is this host's side of the bargain.
+        """
+        QtCore.QTimer.singleShot(0, self._refresh_routine_status)
+
+    def _refresh_routine_status(self) -> None:
+        dialog = self.settings_dialog
+        if dialog is not None:
+            try:
+                dialog.refresh_routine_status()
+            except Exception:
+                log.debug("could not show the routine status", exc_info=True)
 
     def _notify(self, fired) -> None:
         kind = {"meeting": "Meeting", "alarm": "Alarm", "timer": "Timer"}.get(fired.kind, "Floating Clock")

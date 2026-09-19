@@ -22,12 +22,13 @@ from tkinter import ttk
 from . import (
     hovercard, popupmenu,
     alerts, daybar, meetings as meetings_mod, orgs as orgs_mod, outlook,
-    peek as peek_mod, prayer as prayer_mod, render,
+    peek as peek_mod, prayer as prayer_mod, render, routines as routines_mod,
     settings as cfg, themes, toast as toast_mod, tray as tray_mod,
     win32util as w32,
 )
 from . import __version__, logsetup
-from .settings_ui import SettingsUI, clock_text
+from .settings_ui import SettingsUI
+from .timetext import clock_text, span as _span
 
 log = logging.getLogger(__name__)
 
@@ -91,18 +92,10 @@ LOOP_ERROR_EVERY_S = 600.0
 # this often -- so a stopped loop shows as a gap rather than as nothing.
 HEARTBEAT_EVERY = timedelta(hours=1)
 # How often the alert loop asks whether the masjid's calendar is due a look.
-PRAYER_CHECK_EVERY = timedelta(seconds=30)
 BAR_LEAD_MINUTES = 60    # run-up over which the progress bar fills
 CLICK_SLOP = 4          # px of travel still counted as a click
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-
-
-def _span(seconds: float) -> str:
-    """'4h 10m' / '25m' for the hover detail's distances."""
-    minutes = max(0, int(round(seconds / 60)))
-    hours, minutes = divmod(minutes, 60)
-    return "%dh %dm" % (hours, minutes) if hours else "%dm" % minutes
 
 
 def startup_command() -> str:
@@ -174,21 +167,19 @@ class FloatingClock(SettingsUI):
         self._snoozed: list[tuple[datetime, alerts.Fired]] = []
         # Iqama times from the masjid's calendar, and the sentence the
         # settings page shows about where they came from.
-        self.prayers: list = []
-        self.prayer_status = ""
+        self.prayer_loader = prayer_mod.Loader(
+            self.s, cfg.config_dir,
+            to_ui=lambda fn: self.root.after(0, fn),
+            on_ready=self._prayers_ready,
+        )
         # What has already been shaken for, and already reminded about, so
         # neither fires twice for the same meeting or prayer.
         self._nudged: set[str] = set()
         self._prayer_notified: set[str] = set()
-        # Alexa routines already fired today, and the last word on how that
-        # went, which the settings page shows.
-        self._alexa_fired: set[str] = set()
-        self.prayer_alexa_status = ""
-        # Keeping the times current: whether a load is in flight, when one
-        # was last started, and when the loop next looks.
-        self._prayer_loading = False
-        self._prayer_last_try: datetime | None = None
-        self._prayer_next_check: datetime | None = None
+        # What each prayer sets off -- the trigger URLs and the speaker --
+        # and the last word on how that went, which the settings page shows.
+        # Shared with the Qt host, which owns one of these too.
+        self.routines = routines_mod.Runner(self.s, on_status=self._routine_status)
         self._last_heartbeat: datetime | None = None
         self._loop_errors: dict[str, float] = {}
         self.peek = None
@@ -222,7 +213,7 @@ class FloatingClock(SettingsUI):
         self._poll_hotkeys()
         self._poll_rescue()
         self._start_calendar()
-        self._poll_prayers()
+        self.prayer_loader.start()
         self._poll_alerts()
         self._autosave()
         if cfg.LOAD_FAILED:
@@ -663,7 +654,7 @@ class FloatingClock(SettingsUI):
         last = getattr(self, "_last_heartbeat", None)
         if last is not None and now - last < HEARTBEAT_EVERY:
             return
-        if getattr(self, "_prayer_loading", False):
+        if self.prayer_loader.loading:
             # The times are still arriving. A line now would say nothing is
             # armed a moment before it is -- and read like the very fault
             # the heartbeat is there to rule out.
@@ -672,17 +663,15 @@ class FloatingClock(SettingsUI):
         logsetup.ensure()
         prayers = list(getattr(self, "prayers", ()) or ())
         through = max(p.iqama for p in prayers).strftime("%a %d %b") if prayers else "none"
-        if self.s.get("prayer_enabled", True) and self.s.get("prayer_alexa_enabled", False):
-            upcoming = prayer_mod.next_hook(
-                prayers, now, float(self.s.get("prayer_alexa_lead_minutes", 10)),
-                self.s.get("prayer_alexa_hooks") or {},
-            )
-            alexa = ("next %s at %s" % (upcoming[0].name, upcoming[1].strftime("%a %H:%M"))
+        if self.s.get("prayer_enabled", True):
+            upcoming = self.routines.next_due(prayers, now)
+            armed = ("next %s %s at %s" % (upcoming[2], upcoming[0].name,
+                                           upcoming[1].strftime("%a %H:%M"))
                      if upcoming else "nothing armed")
         else:
-            alexa = "off"
-        log.info("Alive %s: %d prayer times through %s; Alexa %s; settings %s",
-                 __version__, len(prayers), through, alexa,
+            armed = "off"
+        log.info("Alive %s: %d prayer times through %s; routines %s; settings %s",
+                 __version__, len(prayers), through, armed,
                  "unreadable" if cfg.LOAD_FAILED else "ok")
 
     # --- mutators ----------------------------------------------------------
@@ -1391,90 +1380,24 @@ class FloatingClock(SettingsUI):
             self.poller.refresh_now()
 
     # --- prayer times ------------------------------------------------------
-    def _poll_prayers(self) -> None:
-        """Read the iqama times at startup -- fetching fresh ones when the
-        saved copy predates last night's check.
+    # The reading and the refreshing live in prayer.Loader, which the Qt host
+    # owns one of too. What is left here is the two places this host differs:
+    # what the rest of it reads, and what happens when times land.
+    @property
+    def prayers(self) -> list:
+        return self.prayer_loader.prayers
 
-        From then on the alert loop keeps them current (_maybe_refresh_prayers):
-        a check every night at 02:30, a catch-up within a minute of starting
-        after a night the PC was off or asleep, and a retry every few minutes
-        while there are no times at all. This used to be a six-hourly timer,
-        and a timer is exactly what does not survive a sleep or a bad start.
-        """
-        stale = prayer_mod.refresh_due(
-            datetime.now(), prayer_mod.checked_at(cfg.config_dir()), None, True
-        )
-        self._load_prayers(force=stale)
-
-    def _maybe_refresh_prayers(self, now: datetime) -> None:
-        """The nightly look at the masjid's calendar, and every catch-up."""
-        if not self.s.get("prayer_enabled", True) or getattr(self, "_prayer_loading", False):
-            return
-        next_check = getattr(self, "_prayer_next_check", None)
-        if next_check is not None and now < next_check:
-            return
-        self._prayer_next_check = now + PRAYER_CHECK_EVERY
-        if prayer_mod.refresh_due(
-            now, prayer_mod.checked_at(cfg.config_dir()),
-            getattr(self, "_prayer_last_try", None), bool(getattr(self, "prayers", ())),
-        ):
-            log.info("Checking %s's calendar for changes", prayer_mod.SOURCE_NAME)
-            self._load_prayers(force=True)
-
-    def _load_prayers(self, force: bool = False) -> None:
-        """Read the times on a worker: a feed that is slow, or a masjid whose
-        site is down, must never hold up the clock's own loop."""
-        if not self.s.get("prayer_enabled", True):
-            if self.prayers or self.prayer_status:
-                self.prayers, self.prayer_status = [], ""
-                self._paint(force=True)
-            return
-        if getattr(self, "_prayer_loading", False):
-            return
-        self._prayer_loading = True
-        self._prayer_last_try = datetime.now()
-        url = str(self.s.get("prayer_ics_url", "") or "")
-        base = cfg.config_dir()
-
-        def work() -> None:
-            found, status = None, ""
-            try:
-                found, status = prayer_mod.load(base, url, force=force)
-            except Exception:
-                log.warning("Could not load the prayer times", exc_info=True)
-            finally:
-                # Always report back, even empty-handed: a load that never
-                # says it has finished would block every later one.
-                try:
-                    self.root.after(0, self._prayers_done, found, status)
-                except Exception:
-                    self._prayer_loading = False
-
-        threading.Thread(
-            target=work, name="floating-clock-prayers", daemon=True
-        ).start()
-
-    def _prayers_done(self, found, status: str) -> None:
-        self._prayer_loading = False
-        if found is not None:
-            self._prayers_ready(found, status)
+    @property
+    def prayer_status(self) -> str:
+        return self.prayer_loader.status
 
     def _prayers_ready(self, found: list, status: str) -> None:
-        self._prayer_loading = False
-        previous = list(getattr(self, "prayers", ()) or ())
-        changes = prayer_mod.diff(previous, found) if previous and found else []
-        for line in changes:
-            log.info("Prayer time changed: %s", line)
-        if changes:
-            status = "%s  Changed: %s." % (status, "; ".join(changes[:3]))
-        self.prayers, self.prayer_status = found, status
-        log.info("Prayer times: %d loaded -- %s", len(found), status)
         self._paint(force=True)
         self._refresh_prayer_page()
 
     def refresh_prayers(self, force: bool = True) -> None:
         """Settings page hook: fetch the calendar again now."""
-        self._load_prayers(force=force)
+        self.prayer_loader.refresh(force=force)
 
     # --- alerts ------------------------------------------------------------
     def _poll_alerts(self) -> None:
@@ -1489,7 +1412,8 @@ class FloatingClock(SettingsUI):
             now = datetime.now()
             events = self.events if self.s["calendar_enabled"] else ()
             lead = float(self.s["meeting_lead_minutes"])
-            self._guarded("Alexa triggers", lambda: self._poll_alexa(now))
+            self._guarded("prayer routines",
+                          lambda: self.routines.poll(getattr(self, "prayers", ()), now))
             self._guarded("meeting reminders", lambda: [
                 self._show_toast(fired)
                 for fired in self.scheduler.due(now, events, lead_minutes=lead)
@@ -1497,7 +1421,7 @@ class FloatingClock(SettingsUI):
             self._guarded("prayer reminders", lambda: self._poll_prayer_alerts(now))
             self._guarded("nudge", lambda: self._poll_nudge(now, events))
             self._guarded("snoozed alerts", lambda: self._poll_snoozed(now))
-            self._guarded("prayer-time check", lambda: self._maybe_refresh_prayers(now))
+            self._guarded("prayer-time check", lambda: self.prayer_loader.poll(now))
             self._guarded("heartbeat", lambda: self._heartbeat(now))
             self._guarded("notification pruning", self.scheduler.forget_old_notifications)
         except Exception:
@@ -1574,58 +1498,24 @@ class FloatingClock(SettingsUI):
         if len(self._prayer_notified) > 60:
             self._prayer_notified = prayer_mod.prune_keys(self._prayer_notified, now)
 
-    def _poll_alexa(self, now: datetime) -> None:
-        """Fire each prayer's Alexa routine as its moment arrives."""
-        if not (self.s.get("prayer_enabled", True)
-                and self.s.get("prayer_alexa_enabled", False)):
-            return
-        prayers = getattr(self, "prayers", ())
-        if not prayers:
-            return
-        due = prayer_mod.hooks_due(
-            prayers, now, float(self.s.get("prayer_alexa_lead_minutes", 10)),
-            self.s.get("prayer_alexa_hooks") or {}, self._alexa_fired,
-        )
-        for item, url in due:
-            self._alexa_fired.add(prayer_mod.hook_key(item))
-            self.fire_alexa(item.name, url)
-        if len(self._alexa_fired) > 20:
-            self._alexa_fired = prayer_mod.prune_keys(self._alexa_fired, now)
+    def _routine_status(self, kind: str, text: str) -> None:
+        """A worker has something to report. Hop to the UI thread and show it.
 
-    def fire_alexa(self, name: str, url: str) -> None:
-        """Call one trigger URL on a worker, and say how it went.
-
-        On a thread because the routine's moment is exactly when the clock
-        must not stall: a trigger service that hangs would freeze the digits.
+        The Runner is host-neutral and knows nothing about Tk; getting back
+        to the main thread is this host's side of the bargain.
         """
-        when = datetime.now().strftime("%H:%M")
+        try:
+            self.root.after(0, self._refresh_prayer_page)
+        except Exception:
+            pass                       # the window has gone; the log still has it
 
-        def work() -> None:
-            try:
-                # Retried inside the grace window: the moment a routine is due
-                # is often the minute a laptop is still finding the network.
-                problem, tries, reply = prayer_mod.fire_with_retries(url)
-            except Exception as exc:   # a trigger thread must never die quietly
-                problem, tries, reply = (str(exc)[:90] or exc.__class__.__name__), 1, ""
-            detail = " after %d tries" % tries if tries > 1 else ""
-            said = " -- reply: %s" % reply if reply else ""
-            if problem:
-                log.warning("Alexa routine for %s failed at %s%s: %s%s",
-                            name, when, detail, problem, said)
-                status = "%s at %s%s: %s" % (name, when, detail, problem)
-            else:
-                log.info("Alexa routine for %s fired at %s%s%s", name, when, detail, said)
-                status = "%s fired at %s%s." % (name, when, detail)
-            try:
-                self.root.after(0, self._alexa_status, status)
-            except Exception:
-                pass
+    # The settings page's "Test" buttons, which prove the wiring without
+    # waiting for a prayer.
+    def fire_routine(self, name: str, url: str) -> None:
+        self.routines.fire_hook(name, url)
 
-        threading.Thread(target=work, name="floating-clock-alexa", daemon=True).start()
-
-    def _alexa_status(self, status: str) -> None:
-        self.prayer_alexa_status = status
-        self._refresh_prayer_page()
+    def fire_cast(self, name: str, media: str) -> None:
+        self.routines.fire_cast(name, media)
 
     def _poll_nudge(self, now: datetime, events) -> None:
         """A meeting a minute out: fly the clock in and shake it.

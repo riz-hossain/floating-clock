@@ -2,8 +2,8 @@
 
 Plain Qt widgets, styled from the same palette module the Windows dialog
 uses, so light and dark mode and the theme's accent carry over. Pages:
-Clock, Behaviour, Meetings, Calendars (the email-first add flow), Alarms,
-Timers.
+Clock, Behaviour, Meetings, Calendars (the email-first add flow), Prayer,
+Alarms, Timers.
 """
 
 from __future__ import annotations
@@ -17,13 +17,29 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import json
 
 from .. import (
-    alerts, caldav, google_oauth, ics, orgs as orgs_mod, palette as pal, providers, render,
-    themes, vault,
+    alerts, caldav, cast as cast_mod, google_oauth, ics, orgs as orgs_mod,
+    palette as pal, prayer as prayer_mod, providers, render,
+    routines as routines_mod, settings as cfg, themes, vault,
 )
-from ..settings_ui import parse_clock_time
+from ..timetext import parse_clock_time
 
 PAGES = (("clock", "Clock"), ("behaviour", "Behaviour"), ("meetings", "Meetings"),
-         ("calendars", "Calendars"), ("alarms", "Alarms"), ("timers", "Timers"))
+         ("calendars", "Calendars"), ("prayer", "Prayer"), ("alarms", "Alarms"),
+         ("timers", "Timers"))
+
+# Under each trigger box. Maghrib is the one real exception in the set: its
+# azan follows the sun, and the masjid's iqama is a few minutes after sunset,
+# so firing early against the iqama would call it before the sun had gone.
+ROUTINE_ROW_NOTES = {
+    "Dhuhr": "Friday's Jumuah uses this one too.",
+    "Maghrib": "Best left empty. Maghrib is called at sunset, not at the iqama, so "
+               "the assistant's own sunset trigger is the one to use for it.",
+}
+CAST_ROW_NOTES = {
+    "Dhuhr": "Friday's Jumuah uses this one too.",
+    "Maghrib": "Maghrib is called at sunset, a few minutes before the iqama here, so "
+               "playing early against the iqama would call it before sunset.",
+}
 
 
 def stylesheet(p: pal.Palette) -> str:
@@ -92,6 +108,18 @@ class SettingsDialog(QtWidgets.QDialog):
             scroll.setWidget(page)
             self.stack.addWidget(scroll)
         self.nav.setCurrentRow(0)
+
+    def closeEvent(self, event) -> None:
+        """Write the settings out when the window closes.
+
+        The Qt host otherwise only saves on quit, so a clock that was force
+        quit -- or stopped by an upgrade -- lost whatever was changed here.
+        """
+        try:
+            cfg.save(self.s)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def show_page(self, key: str) -> None:
         keys = [k for k, _t in PAGES]
@@ -306,6 +334,338 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _add_calendar(self) -> None:
         AddCalendarDialog(self).exec()
+
+    # --- prayer ------------------------------------------------------------------
+    def _page_prayer(self, body) -> None:
+        g = self._group(
+            body, "Iqama times",
+            "Iqama is when the congregation stands, and every masjid sets its own. "
+            "Paste your masjid's website and the clock reads its timetable straight "
+            "off it; an iqamah iCal address works too. Leave it empty for %s, which "
+            "is built in. The times are saved on this Mac, so they still show when "
+            "you are offline." % prayer_mod.SOURCE_NAME)
+        self._check(g, "Follow a masjid's iqama times", "prayer_enabled",
+                    after=lambda: self.clock.refresh_prayers(force=False))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Masjid"))
+        self.prayer_url = QtWidgets.QLineEdit(self.s.get("prayer_ics_url", ""))
+        self.prayer_url.setPlaceholderText(
+            "your masjid's website, or an iCal address")
+        self.prayer_url.editingFinished.connect(self._set_prayer_url)
+        row.addWidget(self.prayer_url, 1)
+        g.addLayout(row)
+        self._slider(g, "Remind me (minutes before)", "prayer_lead_minutes", 0, 60, 1,
+                     lambda v: self.s.__setitem__("prayer_lead_minutes", int(v)))
+        self._slider(g, "Show on the clock this long before", "prayer_show_minutes",
+                     0, 720, 5, lambda v: self.s.__setitem__("prayer_show_minutes", int(v)))
+
+        g = self._group(body, "Today")
+        self.prayer_list = QtWidgets.QListWidget()
+        g.addWidget(self.prayer_list)
+        self.prayer_status = QtWidgets.QLabel("")
+        self.prayer_status.setObjectName("muted")
+        self.prayer_status.setWordWrap(True)
+        g.addWidget(self.prayer_status)
+
+        # --- trigger URLs ---
+        g = self._group(
+            body, "Routine triggers",
+            "No assistant lets you change a routine's time from outside, so the "
+            "routine stops using a time at all and starts from a plain web address "
+            "instead. Alexa: add a trigger skill (URL Routine Trigger is free) and "
+            "set each routine's WHEN to its trigger. Google: a Home Assistant "
+            "webhook or an IFTTT applet ends in the same kind of address -- or skip "
+            "routines and use the speaker below, which needs no account at all.")
+        self._check(g, "Call a trigger address at each prayer", "prayer_routines_enabled",
+                    repaint=False)
+        self._slider(g, "Fire this long before iqama", "prayer_routines_lead_minutes",
+                     0, 60, 1,
+                     lambda v: self.s.__setitem__("prayer_routines_lead_minutes", int(v)))
+        self.routine_fields = {}
+        hooks = self.s.get("prayer_routines_hooks") or {}
+        for name in prayer_mod.DAILY:
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(self._row_label(name, ROUTINE_ROW_NOTES.get(name, "")))
+            field = QtWidgets.QLineEdit(str(hooks.get(name) or ""))
+            field.setPlaceholderText("https://…")
+            field.editingFinished.connect(lambda n=name: self._set_routine_hook(n))
+            self.routine_fields[name] = field
+            row.addWidget(field, 1)
+            test = QtWidgets.QPushButton("Test")
+            test.clicked.connect(lambda _c=False, n=name: self._test_routine(n))
+            row.addWidget(test)
+            g.addLayout(row)
+        same = QtWidgets.QPushButton("Same for all")
+        same.clicked.connect(self._routine_same_for_all)
+        g.addWidget(same)
+        self.routine_status = QtWidgets.QLabel("")
+        self.routine_status.setObjectName("muted")
+        self.routine_status.setWordWrap(True)
+        g.addWidget(self.routine_status)
+
+        # --- the speaker ---
+        g = self._group(
+            body, "Google or Nest speaker",
+            "Google Home has no trigger address to point a routine at, so for Google "
+            "the clock skips the routine and plays the adhan on the speaker itself, "
+            "over your network. Nothing to link and no skill to enable. The audio is "
+            "your own file or link: nothing is shipped with the clock. This Mac has "
+            "to be awake and on the same network as the speaker.")
+        self._check(g, "Play the adhan on a speaker at each prayer", "prayer_cast_enabled",
+                    repaint=False)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Speaker"))
+        self.cast_device = QtWidgets.QLineEdit(str(self.s.get("prayer_cast_device") or ""))
+        self.cast_device.setPlaceholderText("the name shown in the Google Home app")
+        self.cast_device.editingFinished.connect(self._set_cast_device)
+        row.addWidget(self.cast_device, 1)
+        find = QtWidgets.QPushButton("Find speakers")
+        find.clicked.connect(self._find_speakers)
+        row.addWidget(find)
+        g.addLayout(row)
+        self._slider(g, "Play this long before iqama", "prayer_cast_lead_minutes", 0, 60, 1,
+                     lambda v: self.s.__setitem__("prayer_cast_lead_minutes", int(v)))
+        self._slider(g, "Speaker volume", "prayer_cast_volume", 0.0, 1.0, 0.05,
+                     lambda v: self.s.__setitem__("prayer_cast_volume", float(v)),
+                     integer=False)
+
+        self.cast_media_fields = {}
+        for name, caption, note in (
+            ("", "Adhan", "Used for every prayer unless one below says otherwise."),
+        ) + tuple((n, n, CAST_ROW_NOTES.get(n, "")) for n in prayer_mod.DAILY):
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(self._row_label(caption, note))
+            initial = (str(self.s.get("prayer_cast_media_default") or "") if not name
+                       else str((self.s.get("prayer_cast_media") or {}).get(name) or ""))
+            field = QtWidgets.QLineEdit(initial)
+            field.setPlaceholderText("a file, or https://…" if not name else "same as above")
+            field.editingFinished.connect(lambda n=name: self._set_cast_media(n))
+            self.cast_media_fields[name] = field
+            row.addWidget(field, 1)
+            choose = QtWidgets.QPushButton("Choose…")
+            choose.clicked.connect(lambda _c=False, n=name: self._choose_cast_file(n))
+            row.addWidget(choose)
+            test = QtWidgets.QPushButton("Test")
+            test.clicked.connect(lambda _c=False, n=name: self._test_cast(n))
+            row.addWidget(test)
+            g.addLayout(row)
+        self.cast_status = QtWidgets.QLabel("")
+        self.cast_status.setObjectName("muted")
+        self.cast_status.setWordWrap(True)
+        g.addWidget(self.cast_status)
+
+        self.refresh_prayer_page()
+        self.refresh_routine_status()
+
+    def _row_label(self, text: str, note: str) -> QtWidgets.QLabel:
+        label = QtWidgets.QLabel(text)
+        if note:
+            label.setToolTip(note)
+        label.setMinimumWidth(70)
+        return label
+
+    def _set_prayer_url(self) -> None:
+        url = self.prayer_url.text().strip()
+        if url == str(self.s.get("prayer_ics_url") or ""):
+            return
+        self.s["prayer_ics_url"] = url
+        cfg.save(self.s)
+        self.clock.refresh_prayers(force=True)
+
+    def refresh_prayer_page(self) -> None:
+        """Redraw today's times. Called when a load lands."""
+        listing = getattr(self, "prayer_list", None)
+        if listing is None:
+            return
+        listing.clear()
+        now = datetime.now()
+        if not self.s.get("prayer_enabled", True):
+            self.prayer_status.setText("Switched off.")
+            return
+        today = prayer_mod.on_day(self.clock.prayers, now.date())
+        for item in today:
+            listing.addItem("%-8s %s" % (item.name, item.time_text(bool(self.s["use_24h"]))))
+        if not today:
+            listing.addItem("No times for today in that calendar.")
+        self.prayer_status.setText(
+            self.clock.prayer_status or "Reading the calendar…")
+
+    def refresh_routine_status(self) -> None:
+        """Show the last word from the Runner on both cards."""
+        status = getattr(getattr(self.clock, "routines", None), "status", {}) or {}
+        label = getattr(self, "routine_status", None)
+        if label is not None:
+            label.setText(status.get(routines_mod.HOOK) or self._routine_summary())
+        label = getattr(self, "cast_status", None)
+        if label is not None:
+            label.setText(status.get(routines_mod.CAST) or self._cast_summary())
+
+    def _routine_summary(self) -> str:
+        hooks = self.s.get("prayer_routines_hooks") or {}
+        set_up = [name for name in prayer_mod.DAILY if hooks.get(name)]
+        if not set_up:
+            return "No triggers yet."
+        if not self.s.get("prayer_routines_enabled", False):
+            return "%d trigger(s) saved, switched off." % len(set_up)
+        return "Ready: %s." % ", ".join(set_up)
+
+    def _cast_summary(self) -> str:
+        problem = cast_mod.available()
+        if problem:
+            return problem
+        device = str(self.s.get("prayer_cast_device") or "").strip()
+        table = routines_mod.media_table(self.s)
+        if not device:
+            return "No speaker chosen."
+        if not table:
+            return "No adhan chosen."
+        if not self.s.get("prayer_cast_enabled", False):
+            return "%s is set up, switched off." % device
+        return "Ready: %s on %s." % (", ".join(sorted(table)), device)
+
+    # --- trigger URLs ------------------------------------------------------------
+    def _set_routine_hook(self, name: str) -> None:
+        field = self.routine_fields.get(name)
+        if field is None:
+            return
+        url = field.text().strip()
+        problem = prayer_mod.check_hook(url)
+        if problem:
+            self.routine_status.setText("%s: %s" % (name, problem))
+            return
+        hooks = dict(self.s.get("prayer_routines_hooks") or {})
+        if url == str(hooks.get(name) or ""):
+            return
+        if url:
+            hooks[name] = url
+        else:
+            hooks.pop(name, None)
+        self.s["prayer_routines_hooks"] = hooks
+        cfg.save(self.s)
+        self.routine_status.setText(
+            "%s trigger saved." % name if url else "%s trigger cleared." % name)
+
+    def _routine_same_for_all(self) -> None:
+        """Copy the one address that is filled in to every prayer."""
+        for name in prayer_mod.DAILY:
+            self._set_routine_hook(name)
+        hooks = dict(self.s.get("prayer_routines_hooks") or {})
+        url = next((hooks[name] for name in prayer_mod.DAILY if hooks.get(name)), "")
+        if not url:
+            self.routine_status.setText("Paste a trigger link into one of the boxes first.")
+            return
+        for name in prayer_mod.DAILY:
+            hooks[name] = url
+            field = self.routine_fields.get(name)
+            if field is not None:
+                field.setText(url)
+        self.s["prayer_routines_hooks"] = hooks
+        cfg.save(self.s)
+        self.routine_status.setText("Every prayer now uses that one trigger.")
+
+    def _test_routine(self, name: str) -> None:
+        self._set_routine_hook(name)
+        url = prayer_mod.hook_for(name, self.s.get("prayer_routines_hooks") or {})
+        if not url:
+            self.routine_status.setText("Paste %s's trigger link first." % name)
+            return
+        self.routine_status.setText("Calling %s's trigger…" % name)
+        self.clock.routines.fire_hook(name, url)
+
+    # --- the speaker -------------------------------------------------------------
+    def _set_cast_device(self) -> None:
+        name = self.cast_device.text().strip()
+        if name == str(self.s.get("prayer_cast_device") or ""):
+            return
+        self.s["prayer_cast_device"] = name
+        cfg.save(self.s)
+        self.cast_status.setText("Speaker saved." if name else "Speaker cleared.")
+
+    def _find_speakers(self) -> None:
+        """List what is on the network, so the name need not be typed blind.
+
+        On a worker: discovery listens for several seconds, and the settings
+        window must not freeze while it does.
+        """
+        problem = cast_mod.available()
+        if problem:
+            self.cast_status.setText(problem)
+            return
+        self.cast_status.setText("Looking for speakers…")
+
+        def work() -> None:
+            names, trouble = cast_mod.discover()
+
+            def show() -> None:
+                if trouble:
+                    self.cast_status.setText("Could not look: %s" % trouble)
+                elif not names:
+                    self.cast_status.setText(
+                        "No speakers answered. They have to be on the same network "
+                        "as this Mac, and switched on.")
+                else:
+                    if len(names) == 1 and not self.cast_device.text().strip():
+                        self.cast_device.setText(names[0])
+                        self._set_cast_device()
+                    self.cast_status.setText("Found: %s." % ", ".join(names))
+            QtCore.QTimer.singleShot(0, show)
+
+        threading.Thread(target=work, name="floating-clock-cast-find",
+                         daemon=True).start()
+
+    def _set_cast_media(self, name: str) -> None:
+        """Save one prayer's adhan -- or, for "", the one every prayer uses."""
+        field = self.cast_media_fields.get(name)
+        if field is None:
+            return
+        media = field.text().strip()
+        if media:
+            problem = cast_mod.check_media(media)
+            if problem:
+                self.cast_status.setText("%s: %s" % (name or "Adhan", problem))
+                return
+        if not name:
+            if media == str(self.s.get("prayer_cast_media_default") or ""):
+                return
+            self.s["prayer_cast_media_default"] = media
+        else:
+            table = dict(self.s.get("prayer_cast_media") or {})
+            if media == str(table.get(name) or ""):
+                return
+            if media:
+                table[name] = media
+            else:
+                table.pop(name, None)
+            self.s["prayer_cast_media"] = table
+        cfg.save(self.s)
+        self.cast_status.setText(
+            "%s adhan saved." % (name or "Default") if media
+            else "%s adhan cleared." % (name or "Default"))
+
+    def _choose_cast_file(self, name: str) -> None:
+        chosen, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Choose the adhan to play" if not name else "Choose %s's adhan" % name,
+            "", "Audio (*.mp3 *.m4a *.aac *.wav *.ogg *.flac);;All files (*)")
+        if not chosen:
+            return
+        field = self.cast_media_fields.get(name)
+        if field is not None:
+            field.setText(chosen)
+            self._set_cast_media(name)
+
+    def _test_cast(self, name: str) -> None:
+        self._set_cast_media(name)
+        self._set_cast_device()
+        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s))
+                 if name else str(self.s.get("prayer_cast_media_default") or "").strip())
+        if not media:
+            self.cast_status.setText("Choose the audio first.")
+            return
+        if not str(self.s.get("prayer_cast_device") or "").strip():
+            self.cast_status.setText("Name the speaker first, or press Find speakers.")
+            return
+        self.cast_status.setText("Starting on %s…" % self.s["prayer_cast_device"])
+        self.clock.routines.fire_cast(name or "Adhan", media)
 
     def _page_alarms(self, body) -> None:
         g = self._group(body, "Alarms", "Type a time such as 7:30, 07:30 or 7:30 pm.")
