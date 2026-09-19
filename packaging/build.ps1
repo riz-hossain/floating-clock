@@ -21,7 +21,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+# $PSScriptRoot rather than $MyInvocation: a pwsh step that dot-sources this
+# script leaves MyCommand.Path null, which stopped the build on its first
+# line with nothing but "Cannot bind argument to parameter 'Path'".
+$here = if ($PSScriptRoot) { $PSScriptRoot }
+        else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $repoRoot = Split-Path -Parent $here
 # PyInstaller has to import the package as `floating_clock`, but the checkout
 # is called floating-clock and a hyphen is not a module name, so the sources

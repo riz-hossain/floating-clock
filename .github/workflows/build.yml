@@ -22,7 +22,9 @@ jobs:
         include:
           - runner: macos-14      # Apple silicon
             label: arm64
-          - runner: macos-13      # Intel
+          # macos-13 retired in December 2025; macos-15-intel is the last
+          # x86_64 image GitHub will offer, and it runs until August 2027.
+          - runner: macos-15-intel
             label: intel
     runs-on: ${{ matrix.runner }}
     steps:
