@@ -395,9 +395,9 @@ class SettingsUI(CalendarsPage):
     def _switch_row(self, card: w.Card, text: str, variable: tk.BooleanVar, command=None,
                     caption: str = "", enabled: bool = True) -> w.Switch:
         row = card.row()
-        texts = self._row_texts(row, text, caption)
         switch = w.Switch(row, self._ui, variable, command)
         switch.pack(side="right", padx=(self._ui.px(16), 0))
+        texts = self._row_texts(row, text, caption)
         if enabled:
             for widget in (row, texts, *texts.winfo_children()):
                 widget.bind("<Button-1>", switch.toggle)
@@ -412,10 +412,10 @@ class SettingsUI(CalendarsPage):
         row = card.row(pady=8)
         top = tk.Frame(row, bg=ui.p.card)
         top.pack(fill="x")
-        self._row_texts(top, text, caption)
         show = fmt if callable(fmt) else (lambda value: fmt % value)
         readout = w.label(top, ui, show(variable.get()), 10, "semibold", colour=ui.p.accent_text)
         readout.pack(side="right")
+        self._row_texts(top, text, caption)
 
         def on_change(value) -> None:
             readout.configure(text=show(value))
@@ -427,10 +427,14 @@ class SettingsUI(CalendarsPage):
         return slider
 
     def _control_row(self, card: w.Card, text: str, caption: str = "") -> tk.Frame:
+        # The control is packed before the text on purpose. _row_texts packs
+        # an expanding frame, and Tk hands out space in packing order, so a
+        # control packed after a long caption gets none and is silently left
+        # unmapped -- present, correct and invisible.
         row = card.row()
-        self._row_texts(row, text, caption)
         slot = tk.Frame(row, bg=self._ui.p.card)
         slot.pack(side="right", padx=(self._ui.px(16), 0))
+        self._row_texts(row, text, caption)
         return slot
 
     # --- clock page --------------------------------------------------------
@@ -778,7 +782,13 @@ class SettingsUI(CalendarsPage):
             "somewhere else. They are saved on this PC, so they still show when you "
             "are offline." % prayer_mod.SOURCE_NAME,
         )
-        w.Button(card.aside, ui, "Refresh", command=self._refresh_prayers_now).pack(side="left")
+        w.Button(
+            card.aside, ui, "Find my masjid\u2026", command=self._open_masjid_picker,
+            kind="primary",
+        ).pack(side="left")
+        w.Button(
+            card.aside, ui, "Refresh", command=self._refresh_prayers_now,
+        ).pack(side="left", padx=(ui.px(8), 0))
         self.var_prayer = tk.BooleanVar(value=bool(self.s.get("prayer_enabled", True)))
         self._switch_row(
             card, "Follow the masjid's prayer times", self.var_prayer, self._toggle_prayer,
@@ -796,21 +806,15 @@ class SettingsUI(CalendarsPage):
         )
         slot = self._control_row(
             card, "Masjid",
-            "Blank uses %s. Paste your masjid's website and the clock reads its "
-            "timetable straight off it -- an iqamah iCal address works too."
-            % prayer_mod.SOURCE_NAME,
+            "Or paste an address. Blank uses %s." % prayer_mod.SOURCE_NAME,
         )
         self.prayer_url_field = w.Field(
-            slot, ui, width=34, initial=str(self.s.get("prayer_ics_url", "") or ""),
-            placeholder="your masjid's website, or an iCal address",
+            slot, ui, width=30, initial=str(self.s.get("prayer_ics_url", "") or ""),
+            placeholder="a masjid's website, or an iCal address",
         )
         self.prayer_url_field.pack(side="left")
         w.Button(
             slot, ui, "Apply", command=self._set_prayer_url,
-            kind="quiet", padx=12, height=28,
-        ).pack(side="left", padx=(ui.px(6), 0))
-        w.Button(
-            slot, ui, "Find my masjid\u2026", command=self._open_masjid_picker,
             kind="quiet", padx=12, height=28,
         ).pack(side="left", padx=(ui.px(6), 0))
         self.prayer_url_field.entry.bind("<FocusOut>", self._set_prayer_url)
