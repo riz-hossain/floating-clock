@@ -75,6 +75,14 @@ def _check() -> int:
               % (__version__, exc.__class__.__name__, exc))
         return 1
     print("Floating Clock %s: every module loaded." % __version__)
+    # Casting is optional -- the clock works without it -- so this reports
+    # rather than fails. It is the only way to tell from outside whether a
+    # frozen build actually carries pychromecast, which lives in the archive
+    # and leaves no file to look for.
+    from . import cast as cast_mod
+
+    trouble = cast_mod.available()
+    print("Speakers: %s" % (trouble or "pychromecast present; casting available."))
     return 0
 
 

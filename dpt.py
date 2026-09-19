@@ -53,6 +53,15 @@ class DptError(Exception):
     """Something went wrong reaching or reading the mosque's timetable."""
 
 
+class NoApi(DptError):
+    """This address has no timetable API at all.
+
+    Kept apart from the rest so the caller can try reading it as a calendar
+    instead. A site that *has* the API but nothing usable in it is a
+    different matter, and saying so beats a calendar parser's complaint.
+    """
+
+
 # --- finding the API --------------------------------------------------------
 def candidates(site_url: str) -> list[str]:
     """The addresses worth trying, nearest first.
@@ -60,18 +69,25 @@ def candidates(site_url: str) -> list[str]:
     A mosque on a multisite lives under a path -- /icwaterloo/ -- and its API
     hangs off that, not off the domain. Someone pasting the address of the
     prayer-times *page* should still work, so each parent path is tried in
-    turn before the bare domain.
+    turn.
+
+    The bare domain is deliberately not one of them once a path is given. On
+    a multisite the domain is a *different* mosque, and a centre whose own
+    timetable is missing would otherwise be handed its neighbour's times with
+    no sign anything was wrong. Someone whose mosque really is the whole site
+    can paste its home page, and the error says so.
     """
     parts = urllib.parse.urlsplit(site_url.strip())
     if not parts.scheme or not parts.netloc:
         return []
     root = "%s://%s" % (parts.scheme, parts.netloc)
     segments = [seg for seg in parts.path.split("/") if seg]
+    if not segments:
+        return [root]
     out = []
     while segments:
         out.append("%s/%s" % (root, "/".join(segments)))
         segments.pop()
-    out.append(root)
     seen, unique = set(), []
     for base in out:
         if base not in seen:
@@ -85,11 +101,33 @@ def api_url(base: str, which: str = "year") -> str:
 
 
 def _get(url: str, timeout: float = FETCH_TIMEOUT, opener=None):
+    return _get_from(url, timeout, opener)[0]
+
+
+def _get_from(url: str, timeout: float = FETCH_TIMEOUT, opener=None):
+    """(payload, final url) -- the address included, because a redirect can
+    land on a different site and its answer must not be taken for this one's."""
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     open_it = opener or urllib.request.urlopen
     with open_it(request, timeout=timeout) as response:
         charset = getattr(response.headers, "get_content_charset", lambda: None)() or "utf-8"
-        return json.loads(response.read().decode(charset, "replace"))
+        payload = json.loads(response.read().decode(charset, "replace"))
+        final = getattr(response, "geturl", lambda: url)() or url
+        return payload, final
+
+
+def _same_site(base: str, final_url: str) -> bool:
+    """Whether an answer came from the site that was asked.
+
+    On a multisite every mosque is a path under one domain, so a redirect
+    that drops the path lands on somebody else's timetable. Times that are
+    confidently wrong are worse here than no times at all.
+    """
+    asked, got = urllib.parse.urlsplit(base), urllib.parse.urlsplit(final_url)
+    if asked.netloc != got.netloc:
+        return False
+    wanted = asked.path.strip("/")
+    return not wanted or got.path.strip("/").startswith(wanted)
 
 
 def _rows(payload) -> list[dict]:
@@ -111,15 +149,27 @@ def _rows(payload) -> list[dict]:
 
 
 def discover(site_url: str, opener=None) -> str:
-    """The API base for this mosque's site, or "" when it has no such API."""
+    """The API base for this mosque's site, or "" when it has no such API.
+
+    Walking up the path stops at the first address that answers, even when
+    it answers with nothing. On a multisite the parent path is a different
+    mosque, and quietly showing its times instead would be worse than
+    showing none: the whole point is to be right about when to pray.
+    """
     for base in candidates(site_url):
         try:
-            payload = _get(api_url(base, "today"), opener=opener)
+            payload, final = _get_from(api_url(base, "today"), opener=opener)
         except Exception:
+            continue                      # nothing of ours here; try the parent
+        if not _same_site(base, final):
+            continue                      # redirected off this mosque's path
+        if not isinstance(payload, list):
             continue
         if _rows(payload):
-            log.info("Prayer times: found a timetable API at %s", base)
-            return base
+            log.info("Prayer times: found a timetable at %s", base)
+        else:
+            log.info("Prayer times: %s has a timetable API but nothing in it", base)
+        return base
     return ""
 
 
@@ -142,7 +192,9 @@ def fetch(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
     """
     base = discover(site_url, opener=opener)
     if not base:
-        raise DptError("that address has no prayer timetable the clock can read")
+        raise NoApi(
+            "that site does not publish a timetable the clock can read. Try the "
+            "masjid's home page, or ask them for an iqamah iCal address")
     try:
         year = _rows(_get(api_url(base, "year"), timeout, opener))
     except urllib.error.HTTPError as exc:
@@ -154,7 +206,15 @@ def fetch(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
     except Exception as exc:
         raise DptError("could not read the timetable (%s)" % exc) from None
     if not year:
-        raise DptError("the mosque's timetable came back empty")
+        raise DptError("that masjid has not put a timetable on its site yet")
+    # A plugin left behind with an old timetable in it is common enough to be
+    # worth naming: "no prayer times found" would send someone looking for a
+    # fault in the clock instead of at the masjid's website.
+    covered = [row.get("d_date") for row in year if row.get("d_date")]
+    newest = max(str(d)[:10] for d in covered) if covered else ""
+    if newest and newest < datetime.now().strftime("%Y-%m-%d"):
+        raise DptError("that masjid's timetable stops at %s; it needs updating "
+                       "on their website" % newest)
 
     # Jumuah is not in the year's rows -- the plugin keeps it as fixed times
     # rather than a per-day value -- so it takes the second call.

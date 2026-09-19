@@ -353,6 +353,9 @@ class SettingsDialog(QtWidgets.QDialog):
             "your masjid's website, or an iCal address")
         self.prayer_url.editingFinished.connect(self._set_prayer_url)
         row.addWidget(self.prayer_url, 1)
+        apply_it = QtWidgets.QPushButton("Apply")
+        apply_it.clicked.connect(self._apply_prayer_url)
+        row.addWidget(apply_it)
         g.addLayout(row)
         self._slider(g, "Remind me (minutes before)", "prayer_lead_minutes", 0, 60, 1,
                      lambda v: self.s.__setitem__("prayer_lead_minutes", int(v)))
@@ -470,6 +473,14 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         self.s["prayer_ics_url"] = url
         cfg.save(self.s)
+        self.prayer_status.setText("Reading %s…" % (url or prayer_mod.SOURCE_NAME))
+        self.clock.refresh_prayers(force=True)
+
+    def _apply_prayer_url(self) -> None:
+        """Apply reads it again even when the address has not changed, so the
+        button always visibly does something."""
+        self._set_prayer_url()
+        self.prayer_status.setText("Reading…")
         self.clock.refresh_prayers(force=True)
 
     def refresh_prayer_page(self) -> None:

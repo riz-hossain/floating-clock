@@ -441,8 +441,17 @@ def _fetcher_for(url: str):
     def fetch_site(address: str) -> str:
         try:
             return dpt.fetch(address)
-        except dpt.DptError:
-            return ics.fetch(address)
+        except dpt.NoApi as no_api:
+            # No timetable API there at all, so it may still be a calendar.
+            # A site that has one but nothing usable in it keeps its own
+            # message, which says more than a calendar parser's would.
+            try:
+                return ics.fetch(address)
+            except Exception:
+                # Neither worked. "that address did not return a calendar" is
+                # true but unhelpful for someone who pasted a mosque's
+                # website; the first message tells them what to do next.
+                raise dpt.NoApi(str(no_api)) from None
 
     return fetch_site
 

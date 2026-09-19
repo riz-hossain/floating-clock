@@ -82,8 +82,9 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build the app and the installer
-        shell: pwsh
-        run: ./packaging/build.ps1
+        # -File rather than the default dot-sourcing wrapper: that wrapper is
+        # what left the script unable to work out its own folder.
+        run: pwsh -NoProfile -File ./packaging/build.ps1
       - name: Check the bundle is complete
         shell: pwsh
         run: ./packaging/dist/FloatingClock/FloatingClock.exe --check
