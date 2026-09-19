@@ -1,4 +1,4 @@
-; Floating Clock -- Inno Setup script.
+﻿; Floating Clock -- Inno Setup script.
 ;
 ; Builds a per-user setup.exe (no administrator prompt) from the PyInstaller
 ; one-folder output in .\dist\FloatingClock. build.ps1 compiles this as its
@@ -6,7 +6,11 @@
 
 #define AppName "Floating Clock"
 #define AppExe "FloatingClock.exe"
-#define AppVersion "1.9.6"
+; Passed in by build.ps1 from floating_clock/__init__.py, which is the one
+; place a version is written. The fallback is only for running ISCC by hand.
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
 #define AppPublisher "Floating Clock"
 #define AppId "{{8D3F6A61-4F5B-4E0C-9B2A-7C1E2F3A4B5C}"
 #define Payload "dist\FloatingClock"

@@ -36,6 +36,14 @@ if (-not (Test-Path (Join-Path $here 'Setup.iss'))) {
     throw "build.ps1 cannot find its own folder (looked in '$here'). Run it from the repo root."
 }
 $repoRoot = Split-Path -Parent $here
+
+# The single source of truth for the version. Setup.iss used to carry its
+# own copy, which is the kind of thing that ships an installer claiming to
+# be a version the app does not think it is.
+$initPy = Join-Path $repoRoot "__init__.py"
+$version = ([regex]::Match((Get-Content -Raw $initPy),
+           '__version__\s*=\s*"([^"]+)"')).Groups[1].Value
+if (-not $version) { throw "Could not read __version__ from $initPy" }
 # PyInstaller has to import the package as `floating_clock`, but the checkout
 # is called floating-clock and a hyphen is not a module name, so the sources
 # are staged under a correctly named folder and that is what goes on the path.
@@ -158,7 +166,7 @@ if (-not $OneFile) {
     ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
     if ($iscc) {
         Write-Host "`n[5/5] Compiling setup.exe..." -ForegroundColor Yellow
-        & $iscc /Q (Join-Path $here "Setup.iss")
+        & $iscc /Q "/DAppVersion=$version" (Join-Path $here "Setup.iss")
         if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed." }
         $setup = Get-ChildItem (Join-Path $distDir "FloatingClock-Setup-*.exe") |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
