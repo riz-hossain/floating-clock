@@ -26,7 +26,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import dpt, ics
+from . import dpt, ics, mawaqit, prayersconnect
 
 log = logging.getLogger(__name__)
 
@@ -132,8 +132,9 @@ def parse(text: str, window_start: datetime, window_end: datetime) -> list[Praye
     kind of address cannot be read with the wrong reader.
     """
     if text.lstrip()[:1] in ("{", "["):
+        reader = _READERS.get(_cached_source(text), dpt)
         return [Prayer(name=name, iqama=when)
-                for name, when in dpt.parse(text, window_start, window_end)]
+                for name, when in reader.parse(text, window_start, window_end)]
     return parse_ics(text, window_start, window_end)
 
 
@@ -435,6 +436,10 @@ def _fetcher_for(url: str):
     afterwards, because an ICS feed does not always end in .ics -- so the
     fallback costs one failed probe and saves a confusing error.
     """
+    if mawaqit.looks_like(url):
+        return mawaqit.fetch
+    if prayersconnect.looks_like(url):
+        return prayersconnect.fetch
     if dpt.looks_like_ics(url):
         return ics.fetch
 
@@ -456,10 +461,35 @@ def _fetcher_for(url: str):
     return fetch_site
 
 
+# Which module reads a cache, by the name it wrote into it.
+_READERS = {
+    "mawaqit": mawaqit,
+    "prayersconnect": prayersconnect,
+}
+
+
+def _cached_source(text: str) -> str:
+    """Which reader wrote the cache. "" for anything that does not say.
+
+    Read off the cache rather than off a saved setting, so a file left over
+    from a different kind of address cannot be handed to the wrong reader.
+    """
+    import json
+
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return ""
+    return str(data.get("source") or "") if isinstance(data, dict) else ""
+
+
 def source_label(url: str, text: str) -> str:
     """Whose times these are, for the one sentence the settings page shows."""
     if not (url or "").strip() or url.strip() == WATERLOO_MASJID_ICS:
         return SOURCE_NAME
+    reader = _READERS.get(_cached_source(text))
+    if reader is not None:
+        return reader.source_name(text) or urllib.parse.urlsplit(url).netloc
     return dpt.source_name(text) or urllib.parse.urlsplit(url).netloc or SOURCE_NAME
 
 
