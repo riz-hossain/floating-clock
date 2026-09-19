@@ -804,7 +804,11 @@ class SettingsUI(CalendarsPage):
             slot, ui, width=34, initial=str(self.s.get("prayer_ics_url", "") or ""),
             placeholder="your masjid's website, or an iCal address",
         )
-        self.prayer_url_field.pack()
+        self.prayer_url_field.pack(side="left")
+        w.Button(
+            slot, ui, "Apply", command=self._set_prayer_url,
+            kind="quiet", padx=12, height=28,
+        ).pack(side="left", padx=(ui.px(6), 0))
         self.prayer_url_field.entry.bind("<FocusOut>", self._set_prayer_url)
         self.prayer_url_field.entry.bind("<Return>", self._set_prayer_url)
         self._on_close_save(self._set_prayer_url)
@@ -1167,13 +1171,24 @@ class SettingsUI(CalendarsPage):
         self._paint(force=True)
 
     def _set_prayer_url(self, _event=None) -> None:
+        """Save the masjid address and read it now.
+
+        Written to disk here rather than at close, like the trigger URLs: an
+        address typed off a phone screen is not something to lose to an
+        upgrade, and pressing Apply should visibly do something.
+        """
         field = getattr(self, "prayer_url_field", None)
         if field is None or not field.winfo_exists():
             return
         url = field.get().strip()
         if url == str(self.s.get("prayer_ics_url", "") or ""):
+            self._refresh_prayers_now()
             return
         self.s["prayer_ics_url"] = url
+        cfg.save(self.s)
+        label = getattr(self, "prayer_status_label", None)
+        if label is not None and label.winfo_exists():
+            label.configure(text="Reading %s…" % (url or prayer_mod.SOURCE_NAME))
         self.refresh_prayers()
 
     def _refresh_prayers_now(self) -> None:

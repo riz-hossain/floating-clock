@@ -21,20 +21,29 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-# $PSScriptRoot rather than $MyInvocation: a pwsh step that dot-sources this
-# script leaves MyCommand.Path null, which stopped the build on its first
-# line with nothing but "Cannot bind argument to parameter 'Path'".
-$here = if ($PSScriptRoot) { $PSScriptRoot }
-        else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+# Where this script lives, asked four ways. $MyInvocation.MyCommand.Path is
+# null when a shell dot-sources the script, and $PSScriptRoot came back empty
+# on pwsh 7 under GitHub's runner, so neither is trusted on its own. Separate
+# statements rather than one multi-line if, which parses differently between
+# PowerShell 5.1 and 7.
+$here = $PSScriptRoot
+if (-not $here -and $PSCommandPath) { $here = Split-Path -Parent $PSCommandPath }
+if (-not $here -and $MyInvocation.MyCommand.Path) {
+    $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if (-not $here) { $here = Join-Path (Get-Location).Path 'packaging' }
+if (-not (Test-Path (Join-Path $here 'Setup.iss'))) {
+    throw "build.ps1 cannot find its own folder (looked in '$here'). Run it from the repo root."
+}
 $repoRoot = Split-Path -Parent $here
 # PyInstaller has to import the package as `floating_clock`, but the checkout
 # is called floating-clock and a hyphen is not a module name, so the sources
 # are staged under a correctly named folder and that is what goes on the path.
 # This used to point two levels up at a folder that only existed in the old
 # monorepo, which is why a fresh clone could not be built at all.
+$buildDir = Join-Path $here "build"
 $stageRoot = Join-Path $buildDir "pkg"
 $packageDir = Join-Path $stageRoot "floating_clock"
-$buildDir = Join-Path $here "build"
 $distDir = Join-Path $here "dist"
 $iconPath = Join-Path $buildDir "FloatingClock.ico"
 $entry = Join-Path $buildDir "entry.py"
