@@ -1,21 +1,71 @@
 name: Build
 
-# Every push builds all three platforms and leaves them under the run's
-# Artifacts. Pushing a tag like v1.9.6 also publishes them as a Release, which
-# is what winget and the Microsoft Store point at.
+# Two speeds, on purpose.
+#
+# Every push runs `check` alone: a minute on one runner that imports the whole
+# app and compiles it. It catches the breakage that matters while the code is
+# changing quickly, and it produces nothing.
+#
+# The installers are only built when somebody asks -- the Run workflow button,
+# or a v* tag. Packaging four platforms takes about eight runner-minutes and
+# publishing on every commit would bury the real releases, so it is deliberate
+# rather than automatic.
 on:
   push:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the installers as a GitHub release"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
 
+env:
+  # The build and release jobs run when asked for, and on a version tag.
+  BUILD_WHEN: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+
 jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install what the app imports
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libdbus-1-3
+          python -m pip install --quiet --upgrade \
+            pillow PySide6 python-dateutil keyring pychromecast
+      - name: Stage the package
+        # The checkout is called floating-clock and a hyphen is not a module
+        # name, so the sources are staged the way both build scripts do it.
+        run: |
+          mkdir -p stage/floating_clock
+          cp *.py stage/floating_clock/
+          cp -R qt stage/floating_clock/qt
+      - name: Compile every module
+        run: python -m compileall -q stage/floating_clock
+      - name: Import everything a real start needs
+        env:
+          PYTHONPATH: stage
+          QT_QPA_PLATFORM: offscreen
+        run: python -c "import sys; from floating_clock.qt.main import main; sys.exit(main(['--check']))"
+
   macos:
     name: macOS (${{ matrix.label }})
+    needs: check
+    if: needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +98,8 @@ jobs:
 
   linux:
     name: Linux (x86_64)
+    needs: check
+    if: needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +125,8 @@ jobs:
 
   windows:
     name: Windows (x64)
+    needs: check
+    if: needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,8 +136,8 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build the app and the installer
-        # -File rather than the default dot-sourcing wrapper: that wrapper is
-        # what left the script unable to work out its own folder.
+        # -File rather than the default dot-sourcing wrapper, so the script
+        # can always work out its own folder.
         run: pwsh -NoProfile -File ./packaging/build.ps1
       - name: Check the bundle is complete
         shell: pwsh
@@ -97,21 +151,56 @@ jobs:
   release:
     name: Publish the release
     needs: [macos, linux, windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A tag always publishes. The Run workflow button publishes unless the
+    # publish box was unticked, which is how to get installers to try without
+    # putting them in front of everyone.
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Collect the installers
+        id: collect
+        shell: python
+        run: |
+          import io, os, pathlib, re, shutil
+
+          # __init__.py is the one place a version is written; the installer
+          # takes it from there too, so the two cannot drift apart.
+          text = io.open("__init__.py", encoding="utf-8").read()
+          found_version = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+          if not found_version:
+              raise SystemExit("no __version__ in __init__.py")
+          version = found_version.group(1)
+
+          # Artifacts arrive one directory per job; the release wants them flat.
+          out = pathlib.Path("out")
+          out.mkdir(exist_ok=True)
+          names = []
+          for path in pathlib.Path("artifacts").rglob("*"):
+              if path.suffix in (".dmg", ".exe") or path.name.endswith(".tar.gz"):
+                  shutil.copy2(path, out / path.name)
+                  names.append(path.name)
+          if len(names) < 4:
+              raise SystemExit("expected four installers, found %s" % sorted(names))
+          print("Publishing v%s: %s" % (version, ", ".join(sorted(names))))
+          with io.open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("version=%s\n" % version)
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          tag_name: v${{ steps.collect.outputs.version }}
+          name: Floating Clock ${{ steps.collect.outputs.version }}
+          files: out/*
           generate_release_notes: true
-          # Said plainly on the release rather than discovered at first launch.
+          make_latest: true
           body: |
-            Downloads below. Neither build is signed yet, so the first launch
-            needs one extra step:
+            Built from `${{ github.sha }}` by GitHub Actions.
+
+            Neither installer is signed yet, so the first launch needs one
+            extra step:
 
             - **macOS** - right-click the app in Applications, choose **Open**,
               then **Open** again. Once only.
