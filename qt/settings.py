@@ -22,6 +22,7 @@ from .. import (
     routines as routines_mod, settings as cfg, themes, vault,
 )
 from ..timetext import parse_clock_time
+from . import ui
 
 PAGES = (("clock", "Clock"), ("behaviour", "Behaviour"), ("meetings", "Meetings"),
          ("calendars", "Calendars"), ("prayer", "Prayer"), ("alarms", "Alarms"),
@@ -625,7 +626,7 @@ class SettingsDialog(QtWidgets.QDialog):
                         self.cast_device.setText(names[0])
                         self._set_cast_device()
                     self.cast_status.setText("Found: %s." % ", ".join(names))
-            QtCore.QTimer.singleShot(0, show)
+            ui.post(show)
 
         threading.Thread(target=work, name="floating-clock-cast-find",
                          daemon=True).start()
@@ -887,7 +888,7 @@ class MasjidPicker(QtWidgets.QDialog):
                 found, trouble = masjids_mod.search(text)
             except Exception as exc:        # a search must never crash
                 found, trouble = [], str(exc)[:90] or exc.__class__.__name__
-            QtCore.QTimer.singleShot(0, lambda: self.show_results(found, trouble))
+            ui.post(lambda: self.show_results(found, trouble))
 
         threading.Thread(target=work, name="floating-clock-masjid-search",
                          daemon=True).start()
@@ -918,12 +919,35 @@ class MasjidPicker(QtWidgets.QDialog):
         if index < 0 or index >= len(self.rows):
             self.status.setText("Pick one from the list first.")
             return
+        if self.busy:
+            return
         entry = self.rows[index]
         address = masjids_mod.address_for(entry)
+        name = str(entry.get("name") or "that masjid")
         if not address:
-            self.status.setText(
-                "%s has no website on record, so the clock has nowhere to read "
-                "its times from." % entry.get("name"))
+            self.status.setText("%s publishes no times the clock can read." % name)
+            return
+        # Prove it before saving it. Most masjid websites publish nothing the
+        # clock can read, and saving one of those would replace times that
+        # work with none at all.
+        self.busy = True
+        self.status.setText("Checking %s…" % name)
+
+        def work() -> None:
+            try:
+                prayers, status = masjids_mod.verify(address)
+            except Exception as exc:            # a check must never crash
+                prayers, status = [], str(exc)[:90] or exc.__class__.__name__
+            ui.post(lambda: self.verified(address, name, prayers, status))
+
+        threading.Thread(target=work, name="floating-clock-masjid-verify",
+                         daemon=True).start()
+
+    def verified(self, address: str, name: str, prayers, status: str) -> None:
+        self.busy = False
+        if not prayers:
+            self.status.setText("%s: %s  Nothing was changed." % (
+                name, status.replace("Could not read the prayer times: ", "")))
             return
         self.owner.prayer_url.setText(address)
         self.owner._set_prayer_url()
@@ -980,7 +1004,7 @@ class AddCalendarDialog(QtWidgets.QDialog):
 
         def work():
             found = providers.detect(address)
-            QtCore.QTimer.singleShot(0, lambda: self.detected(found))
+            ui.post(lambda: self.detected(found))
         threading.Thread(target=work, daemon=True).start()
 
     def detected(self, found: providers.Detection) -> None:
@@ -1022,9 +1046,9 @@ class AddCalendarDialog(QtWidgets.QDialog):
                         self.owner.s.get("google_client_secret", ""), login_hint=found.email)
                     calendars = google_oauth.list_calendars(token["access_token"])
                 except google_oauth.GoogleError as exc:
-                    QtCore.QTimer.singleShot(0, lambda: self.say("Sign-in failed: %s" % exc))
+                    ui.post(lambda: self.say("Sign-in failed: %s" % exc))
                     return
-                QtCore.QTimer.singleShot(0, lambda: show(token, calendars))
+                ui.post(lambda: show(token, calendars))
             threading.Thread(target=work, daemon=True).start()
 
         def show(token, calendars) -> None:
@@ -1103,9 +1127,9 @@ class AddCalendarDialog(QtWidgets.QDialog):
             try:
                 calendars = caldav.discover(found.email, password, found.provider.caldav_base)
             except caldav.CalDavError as exc:
-                QtCore.QTimer.singleShot(0, lambda: self.say("Could not connect: %s" % exc))
+                ui.post(lambda: self.say("Could not connect: %s" % exc))
                 return
-            QtCore.QTimer.singleShot(0, lambda: self._show_calendars(calendars))
+            ui.post(lambda: self._show_calendars(calendars))
         threading.Thread(target=work, daemon=True).start()
 
     def _show_calendars(self, calendars) -> None:
@@ -1182,9 +1206,9 @@ class AddCalendarDialog(QtWidgets.QDialog):
                 try:
                     ics.fetch(url)
                 except ics.IcsError as exc:
-                    QtCore.QTimer.singleShot(0, lambda: self.say("That address does not work: %s" % exc))
+                    ui.post(lambda: self.say("That address does not work: %s" % exc))
                     return
-                QtCore.QTimer.singleShot(0, lambda: self._save_ics(found, url))
+                ui.post(lambda: self._save_ics(found, url))
             threading.Thread(target=work, daemon=True).start()
             return
         self._save_ics(found, url)

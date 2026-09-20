@@ -48,6 +48,16 @@ JAMAH_FIELDS = (
 
 FRIDAY = 4
 
+# The plugin's five (start, congregation) column pairs. Asr has two start
+# columns, one per juristic school, and a congregation may follow either.
+_PAIRS = (
+    ("fajr_begins", ("fajr_jamah",)),
+    ("zuhr_begins", ("zuhr_jamah",)),
+    ("asr_mithl_1", ("asr_jamah",)),
+    ("maghrib_begins", ("maghrib_jamah",)),
+    ("isha_begins", ("isha_jamah",)),
+)
+
 
 class DptError(Exception):
     """Something went wrong reaching or reading the mosque's timetable."""
@@ -148,7 +158,26 @@ def _rows(payload) -> list[dict]:
     return rows
 
 
-def discover(site_url: str, opener=None) -> str:
+def resolve(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
+    """Where an address really lives once its redirects are followed.
+
+    Masjids very often own a vanity domain that simply redirects to the page
+    on whatever platform hosts them: kitchenermasjid.com lands on
+    centres.macnet.ca/kitchenermasjid/. The timetable's API hangs off the
+    real home, not off the domain somebody remembered, so that is where
+    discovery has to start -- and the cross-site guard below is right to
+    refuse a *probe* that wanders off, but must not refuse a home page that
+    the masjid itself sent us to.
+    """
+    request = urllib.request.Request(site_url, headers={"User-Agent": USER_AGENT})
+    try:
+        with (opener or urllib.request.urlopen)(request, timeout=timeout) as response:
+            return getattr(response, "geturl", lambda: site_url)() or site_url
+    except Exception:
+        return site_url                   # unreachable: let the probes say so
+
+
+def discover(site_url: str, opener=None, resolved: bool = False) -> str:
     """The API base for this mosque's site, or "" when it has no such API.
 
     Walking up the path stops at the first address that answers, even when
@@ -156,21 +185,59 @@ def discover(site_url: str, opener=None) -> str:
     mosque, and quietly showing its times instead would be worse than
     showing none: the whole point is to be right about when to pray.
     """
-    for base in candidates(site_url):
-        try:
-            payload, final = _get_from(api_url(base, "today"), opener=opener)
-        except Exception:
-            continue                      # nothing of ours here; try the parent
-        if not _same_site(base, final):
-            continue                      # redirected off this mosque's path
-        if not isinstance(payload, list):
-            continue
-        if _rows(payload):
-            log.info("Prayer times: found a timetable at %s", base)
-        else:
-            log.info("Prayer times: %s has a timetable API but nothing in it", base)
-        return base
+    home = site_url if resolved else resolve(site_url, opener=opener)
+    starts = [home] if home == site_url else [home, site_url]
+    tried = set()
+    for start in starts:
+        for base in candidates(start):
+            if base in tried:
+                continue
+            tried.add(base)
+            try:
+                payload, final = _get_from(api_url(base, "today"), opener=opener)
+            except Exception:
+                continue                  # nothing of ours here; try the parent
+            if not _same_site(base, final):
+                continue                  # redirected off this mosque's path
+            if not isinstance(payload, list):
+                continue
+            if _rows(payload):
+                log.info("Prayer times: found a timetable at %s", base)
+            else:
+                log.info("Prayer times: %s has a timetable API but nothing in it", base)
+            return base
     return ""
+
+
+def congregation_unset(rows) -> bool:
+    """Whether the "congregation" columns are really just the start times.
+
+    A masjid whose plugin was installed but never given congregation times
+    publishes jamah == begins for every prayer of the year. The values are
+    plausible, in order and wrong -- Fajr's iqama an hour before the masjid's
+    own website says it is -- so no range check can catch them, and an Alexa
+    routine set to fire at "iqama" would call the azan an hour early.
+
+    Maghrib is often called at the same minute the sun sets, so one match in
+    five is ordinary. Four or more, on nearly every day, is not.
+    """
+    days = unset = 0
+    for row in rows:
+        days += 1
+        same = 0
+        for begin, jamahs in _PAIRS:
+            start = str(row.get(begin) or "")[:5]
+            if not start:
+                continue
+            if begin == "asr_mithl_1":
+                starts = {start, str(row.get("asr_mithl_2") or "")[:5]}
+            else:
+                starts = {start}
+            if any(str(row.get(j) or "")[:5] in starts for j in jamahs):
+                same += 1
+        if same >= 4:
+            unset += 1
+    return days > 0 and unset / days >= 0.9
 
 
 def looks_like_ics(url: str) -> bool:
@@ -185,12 +252,13 @@ def looks_like_ics(url: str) -> bool:
 
 
 # --- fetching ---------------------------------------------------------------
-def fetch(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
+def fetch(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None,
+          resolved: bool = False) -> str:
     """The whole timetable, as the text the clock caches.
 
     Raises DptError with nothing secret in the message.
     """
-    base = discover(site_url, opener=opener)
+    base = discover(site_url, opener=opener, resolved=resolved)
     if not base:
         raise NoApi(
             "that site does not publish a timetable the clock can read. Try the "
@@ -215,6 +283,11 @@ def fetch(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
     if newest and newest < datetime.now().strftime("%Y-%m-%d"):
         raise DptError("that masjid's timetable stops at %s; it needs updating "
                        "on their website" % newest)
+
+    if congregation_unset(year):
+        raise DptError(
+            "that masjid's site lists prayer start times but no congregation "
+            "(iqama) times, so there is nothing for the clock to follow")
 
     # Jumuah is not in the year's rows -- the plugin keeps it as fixed times
     # rather than a per-day value -- so it takes the second call.

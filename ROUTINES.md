@@ -29,15 +29,38 @@ The list comes from two places at once:
 
 - **mawaqit.net**, searched live. Several thousand masjids, and the ones it
   carries come with a whole year of congregation times.
-- **A directory that ships with the clock** — a few hundred Canadian masjids
-  with their addresses and websites. It answers instantly and works with no
-  network, which matters because mawaqit is thin in Canada: four masjids
-  within fifty kilometres of Waterloo against eleven in the city itself.
+- **A directory that ships with the clock** — 355 masjids with their
+  addresses and websites, almost all of them in Ontario. It answers instantly
+  and works with no network. It only knows where a masjid is and what its
+  website is; it does not know the times.
 
-A masjid from the directory has its times read off its own website, so
-whether they arrive depends on what the masjid publishes. The list says which
-is which, and a masjid with no website at all is shown greyed out rather than
-quietly saved as something that will never work.
+A masjid from the directory has its times read off its own website, and most
+masjid websites publish nothing a program can read: the times sit in a picture,
+a PDF or a script. Of the 136 directory masjids that have a website, 14 could
+be read when this was tested. So **the clock checks a masjid before it saves
+it**. Press *Use this masjid* and it reads the times first; if it can, they
+are saved, and if it cannot it says why and leaves what you had exactly as it
+was. A masjid with no website at all is shown greyed out.
+
+Masjids on mawaqit.net are far more dependable: all 75 found in Canada loaded
+and agreed with mawaqit's own figures, in eight provinces. Coverage is uneven,
+though — mostly Ontario, Quebec and Alberta, and searches around Saskatoon,
+Regina and St. John's found none. If your masjid is not on mawaqit, it may be
+worth asking whether they would list themselves there.
+
+### When a masjid is refused
+
+The clock would rather show nothing than show the wrong time, so it refuses:
+
+| What it found | Why it is not used |
+|---|---|
+| A website with no timetable it can read | nothing to read |
+| A timetable that stops at an old year | the masjid has not updated it |
+| Times that cannot be prayer times (Fajr at 00:57) | the plugin is misconfigured |
+| "Congregation" times equal to the start times | the masjid never entered its iqama, and using them would call the azan up to an hour early |
+| A mawaqit page with iqama switched off | the masjid chose not to publish them |
+
+All of these were met on real masjids while testing.
 
 ### Or paste an address
 
@@ -47,7 +70,7 @@ what it is:
 | Paste this | What happens |
 |---|---|
 | `mawaqit.net/en/<masjid>` | a year of congregation times |
-| A masjid's own website | read if it runs the common WordPress prayer-times plugin |
+| A masjid's own website | read if it runs the common WordPress prayer-times plugin, or if it embeds a mawaqit or PrayersConnect page. A vanity domain that redirects (kitchenermasjid.com) is followed to where the masjid really lives |
 | `prayersconnect.com/mosques/<masjid>` | today's congregation times |
 | An iqamah iCal address | read as a calendar |
 

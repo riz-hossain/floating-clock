@@ -23,7 +23,7 @@ from .. import (
     routines as routines_mod, settings as cfg, sounds, themes,
 )
 from ..timetext import clock_text, span as _span
-from . import bitmapwindow as bw
+from . import bitmapwindow as bw, ui
 from .bitmapwindow import BitmapWindow
 
 log = logging.getLogger(__name__)
@@ -214,6 +214,7 @@ class QtClock:
 
     def __init__(self, app: QtWidgets.QApplication) -> None:
         self.app = app
+        ui.init()
         self.s = cfg.load()
         self.renderer = render.Renderer()
         self.scheduler = alerts.Scheduler()
@@ -243,7 +244,7 @@ class QtClock:
         # UI thread, which on Qt is a zero-delay single-shot timer.
         self.prayer_loader = prayer_mod.Loader(
             self.s, cfg.config_dir,
-            to_ui=lambda fn: QtCore.QTimer.singleShot(0, fn),
+            to_ui=ui.post,
             on_ready=self._prayers_ready,
         )
         self.routines = routines_mod.Runner(self.s, on_status=self._routine_status)
@@ -650,7 +651,7 @@ class QtClock:
         except Exception:
             log.warning("Could not fetch organisation marks", exc_info=True)
             return
-        QtCore.QTimer.singleShot(0, lambda: self._marks_ready(filled))
+        ui.post(lambda: self._marks_ready(filled))
 
     def _marks_ready(self, filled: list) -> None:
         self.orgs = filled
@@ -801,7 +802,7 @@ class QtClock:
         The Runner is host-neutral and knows nothing about Qt, so getting
         back to the UI thread is this host's side of the bargain.
         """
-        QtCore.QTimer.singleShot(0, self._refresh_routine_status)
+        ui.post(self._refresh_routine_status)
 
     def _refresh_routine_status(self) -> None:
         dialog = self.settings_dialog

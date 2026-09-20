@@ -54,6 +54,7 @@ jobs:
           mkdir -p stage/floating_clock
           cp *.py stage/floating_clock/
           cp -R qt stage/floating_clock/qt
+          cp -R data stage/floating_clock/data
       - name: Compile every module
         run: python -m compileall -q stage/floating_clock
       - name: Import everything a real start needs
@@ -61,6 +62,21 @@ jobs:
           PYTHONPATH: stage
           QT_QPA_PLATFORM: offscreen
         run: python -c "import sys; from floating_clock.qt.main import main; sys.exit(main(['--check']))"
+      - name: Masjid readers, offline
+        # Pins down what testing against real masjids turned up: a vanity
+        # domain that redirects, a plugin whose "iqama" is its start times,
+        # a masjid that switched iqama off. No network, so it cannot flake.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-readers.py
+      - name: Worker threads reach the UI
+        # QTimer.singleShot from a plain thread is silently never called, which
+        # left every Mac and Linux clock with no prayer times. This runs the
+        # event loop for real; nothing else here does.
+        env:
+          PYTHONPATH: stage
+          QT_QPA_PLATFORM: offscreen
+        run: python packaging/check-qt-threads.py
 
   macos:
     name: macOS (${{ matrix.label }})
