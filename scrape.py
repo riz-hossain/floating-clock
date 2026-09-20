@@ -298,6 +298,13 @@ _NEAR = 16          # lines from one prayer's name to the next
 _SPAN = 6           # lines a prayer's own times can be spread over
 _HEADER = 6         # lines above the first name that can hold column headings
 _HEADING_CHARS = 40  # a line longer than this is prose, not a column heading
+# An instruction is not a heading either. "For Current Iqama Times Select [your branch]" points at
+# iqama times that are somewhere else, and the list under it is the city's prayer times: counting
+# it as the "iqama column" read start times as iqamas (one Vancouver association's home page, in a
+# check of the reader's own confident readings).
+_POINTER = re.compile(
+    r"\b(?:select|choose|click|tap|press|download|subscribe|confirm|visit|contact)\b"
+    r"|\bfor\s+(?:the\s+)?(?:current|latest|updated)\s+iqam", re.I)
 
 
 def _chains(tokens) -> list[list[int]]:
@@ -363,14 +370,16 @@ def _headers(tokens, lines, first) -> list:
 
     A heading is short. A sentence that happens to contain "Iqamah" -- "Confirm
     that Waterloo Masjid Iqamah appears in your calendars" -- is not one, and
-    counting it made the first time in every row look like the iqama.
+    counting it made the first time in every row look like the iqama. An
+    instruction ("For Current Iqama Times Select ...") is not one either.
     """
     name = tokens[first]
     run = []
     for t in reversed(tokens[:first]):
         if name.line - t.line > _HEADER or t.kind in ("time", "name", "bound"):
             break
-        if t.kind == "label" and len(lines[t.line]) <= _HEADING_CHARS:
+        if (t.kind == "label" and len(lines[t.line]) <= _HEADING_CHARS
+                and not _POINTER.search(lines[t.line])):
             run.append(t)
     run.reverse()
     out, previous = [], None
