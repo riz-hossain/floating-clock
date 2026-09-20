@@ -75,6 +75,17 @@ NIGHTLY_AT = (2, 30)
 # times at all -- a laptop waking to no network must not wait a whole day.
 REFRESH_RETRY_MINUTES = 15.0
 EMPTY_RETRY_MINUTES = 5.0
+# A source that keeps failing is asked less and less often, up to this far
+# apart. Five minutes was right for a network still waking up and wrong for a
+# masjid whose site will never answer: nearly three hundred attempts a day,
+# each several requests, to what is often a community's shared host.
+MAX_RETRY_MINUTES = 360.0
+
+
+def retry_gap(failures: int, have_prayers: bool) -> float:
+    """Minutes to wait before trying again, doubling with each failure in a row."""
+    base = REFRESH_RETRY_MINUTES if have_prayers else EMPTY_RETRY_MINUTES
+    return min(MAX_RETRY_MINUTES, base * (2 ** max(0, failures - 1)))
 # What feeds call them -> the name shown here. Spellings vary by mosque, so
 # match on any word of the title: "Jumaa Iqama", "Salat al-Fajr", "Isha'a".
 _ALIASES = {
@@ -632,7 +643,8 @@ def last_nightly(now: datetime) -> datetime:
     return slot if slot <= now else slot - timedelta(days=1)
 
 
-def refresh_due(now: datetime, last_ok, last_try, have_prayers: bool) -> bool:
+def refresh_due(now: datetime, last_ok, last_try, have_prayers: bool,
+                failures: int = 0) -> bool:
     """Whether to fetch the masjid's calendar again right now.
 
     Once a night after 02:30; straight away after a night the PC was off or
@@ -640,7 +652,7 @@ def refresh_due(now: datetime, last_ok, last_try, have_prayers: bool) -> bool:
     all; and never more often than the retry gap, so a feed that is down is
     asked politely rather than hammered.
     """
-    gap = EMPTY_RETRY_MINUTES if not have_prayers else REFRESH_RETRY_MINUTES
+    gap = retry_gap(failures, have_prayers)
     if last_try is not None and now - last_try < timedelta(minutes=gap):
         return False
     if not have_prayers or last_ok is None:
@@ -701,6 +713,7 @@ class Loader:
         self.loading = False
         self.last_try: datetime | None = None
         self.next_check: datetime | None = None
+        self.failures = 0                 # attempts in a row that found nothing
 
     def _dir(self) -> str:
         return self.base_dir() if callable(self.base_dir) else self.base_dir
@@ -710,7 +723,7 @@ class Loader:
         """Read the times at startup, fetching fresh ones when the saved copy
         predates last night's check."""
         stale = refresh_due(datetime.now(), checked_at(self._dir()), None, True)
-        self.refresh(force=stale)
+        self._start(force=stale)
 
     def poll(self, now: datetime) -> None:
         """The nightly look at the masjid's calendar, and every catch-up."""
@@ -719,11 +732,19 @@ class Loader:
         if self.next_check is not None and now < self.next_check:
             return
         self.next_check = now + CHECK_EVERY
-        if refresh_due(now, checked_at(self._dir()), self.last_try, bool(self.prayers)):
+        if refresh_due(now, checked_at(self._dir()), self.last_try,
+                       bool(self.prayers), self.failures):
             log.info("Checking %s's calendar for changes", SOURCE_NAME)
-            self.refresh(force=True)
+            self._start(force=True)
 
     def refresh(self, force: bool = True) -> None:
+        """Read the times now, because somebody asked -- a new address, or the
+        Refresh button. Starts the backing-off over: a person who has just
+        changed something should not be made to wait out the last failure."""
+        self.failures = 0
+        self._start(force)
+
+    def _start(self, force: bool = True) -> None:
         """Read the times on a worker: a feed that is slow, or a masjid whose
         site is down, must never hold up the clock's own loop."""
         if not self.s.get("prayer_enabled", True):
@@ -756,6 +777,8 @@ class Loader:
     # --- back on the UI thread ---------------------------------------------
     def _done(self, found, status: str) -> None:
         self.loading = False
+        # Nothing found, or the load itself blew up: one more in a row.
+        self.failures = 0 if found else self.failures + 1
         if found is None:
             return
         previous = list(self.prayers or ())

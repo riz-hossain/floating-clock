@@ -282,6 +282,47 @@ if have_zones:
 else:
     print("  skip  no timezone database on this machine")
 
+# ---------------------------------------------------------------------------
+print("a source that keeps failing")
+check("the first retry waits five minutes",
+      prayer.retry_gap(1, False) == 5.0, str(prayer.retry_gap(1, False)))
+check("then ten, then twenty",
+      (prayer.retry_gap(2, False), prayer.retry_gap(3, False)) == (10.0, 20.0))
+check("and never more than six hours apart", prayer.retry_gap(40, False) == 360.0)
+check("times already in hand are retried more gently still",
+      prayer.retry_gap(1, True) == 15.0)
+
+ago = datetime.now() - timedelta(minutes=7)
+check("seven minutes on, a first failure is retried",
+      prayer.refresh_due(datetime.now(), None, ago, False, failures=1))
+check("but a third in a row is not -- it waits twenty",
+      not prayer.refresh_due(datetime.now(), None, ago, False, failures=3))
+
+import tempfile
+
+loader = prayer.Loader({"prayer_enabled": True}, tempfile.mkdtemp(),
+                       to_ui=lambda fn: fn(), on_ready=lambda *_: None)
+for _ in range(3):
+    loader._done([], "nothing")
+check("the loader counts failures in a row", loader.failures == 3, str(loader.failures))
+loader._done([prayer.Prayer("Fajr", datetime.now() + timedelta(hours=1))], "read")
+check("and starts again from zero once it reads something", loader.failures == 0)
+
+real_load = prayer.load
+prayer.load = lambda *a, **k: ([], "Could not read the prayer times: nothing")
+try:
+    loader.failures = 5
+    loader.refresh()                       # somebody pressed Refresh or changed the address
+    import time as _time
+
+    deadline = _time.time() + 5
+    while loader.loading and _time.time() < deadline:
+        _time.sleep(0.02)
+    check("a person asking is not made to wait out the last failure",
+          loader.failures == 1, "failures %d" % loader.failures)
+finally:
+    prayer.load = real_load
+
 print()
 if failures:
     print("%d check(s) FAILED: %s" % (len(failures), "; ".join(failures)))
