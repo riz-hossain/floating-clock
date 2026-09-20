@@ -1128,10 +1128,8 @@ class SettingsUI(CalendarsPage):
                 kind = proposal.get("kind")
                 if kind == "none":
                     say("%s  Nothing was changed." % proposal.get("status", ""))
-                elif kind == "exact":
-                    keep(proposal)
                 else:
-                    # Read off a web page, or a neighbour's: shown first.
+                    # Whatever was found is shown first, and kept on a second press.
                     state["pending"] = {"key": key, "proposal": proposal}
                     say(masjids_mod.confirmation(proposal, bool(self.s.get("use_24h"))))
 

@@ -119,7 +119,12 @@ try:
     win = open_picker()
     check("a search fills the list", search_and_pick(win))
     before = app.s.get("prayer_ics_url", "")
-    check("a masjid that can be read is saved and the dialog closes",
+    shown = lambda: any("Check they match" in t for t in labels(win))   # noqa: E731
+    check("a masjid that can be read is shown before it is saved",
+          act(lambda: find(win, w.Button, "Use this masjid").command(), 10, shown),
+          "; ".join(labels(win))[-200:])
+    check("and nothing is saved yet", app.s.get("prayer_ics_url", "") == before)
+    check("a second press keeps it and the dialog closes",
           act(lambda: find(win, w.Button, "Use this masjid").command(), 10,
               lambda: not win.winfo_exists()))
     check("its address is now the one in use",

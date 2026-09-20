@@ -439,6 +439,25 @@ def _neighbours(entry: dict, rows: list, radius_km: float = NEIGHBOUR_KM) -> lis
     return [dict(other, km=round(gap, 1)) for gap, other in out]
 
 
+def _sun_warning(spot, times: list) -> str:
+    """What the sun says against these times, or "".
+
+    A data feed is not refused on this -- a masjid can keep an odd schedule -- but
+    a listing that says Fajr is two minutes before sunrise is worth a person's
+    second look, and it is the kind of thing a stale listing does.
+    """
+    if spot is None or len(times) != 5:
+        return ""
+    from . import astro
+
+    sun = astro.sun_today(spot[0], spot[1])
+    if sun is None:
+        return ""
+    minutes = {("Dhuhr" if name == "Jumuah" else name): int(hhmm[:2]) * 60 + int(hhmm[3:])
+               for name, hhmm in times}
+    return astro.check(minutes, sun)
+
+
 def _proposal(entry: dict, address: str, got: dict, kind: str) -> dict:
     spot = where_of(entry)
     return {
@@ -446,6 +465,7 @@ def _proposal(entry: dict, address: str, got: dict, kind: str) -> dict:
         "times": got["times"], "status": got["status"], "how": got["how"],
         "source": got["source"], "asked": "", "km": entry.get("km"),
         "latitude": spot[0] if spot else None, "longitude": spot[1] if spot else None,
+        "warning": _sun_warning(spot, got["times"]),
     }
 
 
@@ -455,7 +475,7 @@ def propose(entry: dict, rows: list, progress=None, clock=time.time) -> dict:
     {"kind": "exact" | "read" | "proxy" | "none", "address", "name", "times",
      "status", "how", "km", "asked", "latitude", "longitude"}
 
-    "exact"  the times came from a data feed; save them.
+    "exact"  the times came from a data feed.
     "read"   they were read off a web page; show them and ask.
     "proxy"  the masjid asked for publishes nothing the clock can read, and
              these are the nearest masjid's that does; show them, say whose
@@ -516,20 +536,30 @@ def clock_text(times: list, use_24h: bool = False) -> str:
 
 
 def confirmation(proposal: dict, use_24h: bool = False) -> str:
-    """What to say before keeping a proposal that a person has to vouch for."""
+    """What to say before keeping a proposal, which a person has to vouch for.
+
+    Everything is shown, not only what was read off a page: a feed can be out of
+    date too, and the person who prays there is the one who can tell.
+    """
     times = clock_text(proposal.get("times") or [], use_24h)
     name = proposal.get("name") or "that masjid"
+    note = (" Note: %s." % proposal["warning"]) if proposal.get("warning") else ""
+    if proposal.get("kind") == "exact":
+        source = {"mawaqit": "mawaqit.net", "prayersconnect": "PrayersConnect"}.get(
+            proposal.get("source"), "its published timetable")
+        return ("%s's times, from %s: %s.%s  Check they match what the masjid announces -- a listing "
+                "can be out of date. Press Use this masjid again to keep them." % (name, source, times, note))
     if proposal.get("kind") == "proxy":
         km = proposal.get("km")
         return ("%s publishes no times the clock can read. The nearest masjid that does is %s%s: "
                 "%s.  These are %s's times, not %s's, and may differ from what %s announces. "
-                "Press Use this masjid again to keep them." % (
+                "Press Use this masjid again to keep them.%s" % (
                     proposal.get("asked") or "That masjid", name,
                     " (%.1f km away)" % km if km else "", times, name,
-                    proposal.get("asked") or "it", proposal.get("asked") or "it"))
-    return ("Read from %s's web page: %s.  A page can be out of date or laid out in a way "
+                    proposal.get("asked") or "it", proposal.get("asked") or "it", note))
+    return ("Read from %s's web page: %s.%s  A page can be out of date or laid out in a way "
             "that fools a reader, so check these against the masjid. Press Use this masjid "
-            "again to keep them." % (name, times))
+            "again to keep them." % (name, times, note))
 
 
 def apply(settings: dict, proposal: dict) -> None:

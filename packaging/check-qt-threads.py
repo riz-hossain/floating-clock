@@ -85,7 +85,11 @@ check("and stops saying it is searching", not picker.busy)
 picker.listing.setCurrentRow(0)
 before = dialog.prayer_url.text()
 picker.use()
-check("a masjid that can be read is saved and the dialog closes",
+check("a masjid that can be read is shown before it is saved",
+      spin(10, lambda: "Check they match" in picker.status.text()), "status %r" % picker.status.text())
+check("and nothing is saved yet", dialog.prayer_url.text() == before)
+picker.use()
+check("a second press keeps it and the dialog closes",
       spin(10, lambda: picker.result() == picker.DialogCode.Accepted),
       "status %r" % picker.status.text())
 check("its address is now the one in use",

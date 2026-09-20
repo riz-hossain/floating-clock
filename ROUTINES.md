@@ -67,9 +67,10 @@ reader, so the clock treats it warily:
   in September is refused however well it is laid out. Maghrib written as
   "Sunset" or "5 minutes after sunset" is worked out from where the masjid is.
 
-And **the clock shows you what it read before it keeps it.** Press *Use this
-masjid* and, for anything read off a web page, the five times appear for you to
-check against the masjid; press the button again to keep them.
+And **the clock shows you what it found before it keeps it.** Press *Use this
+masjid* and the five times appear for you to check against the masjid -- whether
+they came from a page or a feed, since a listing can be out of date too -- with a
+note if the sun objects to one of them; press the button again to keep them.
 
 ### When a masjid publishes nothing the clock can read
 

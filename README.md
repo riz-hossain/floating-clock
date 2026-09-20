@@ -18,7 +18,7 @@ run a Qt one. Everything underneath is the same code.
 - **Prayer times** — press *Find my masjid*, type a town, an address or a
   postal code, and pick yours from the list (OpenStreetMap, mawaqit.net and a
   bundled directory, searched together). The clock reads the masjid's times the
-  way you would from its website, shows you what it read before keeping it,
+  way you would from its website, shows you what it found before keeping it,
   and checks nightly for changes. Where a masjid publishes nothing it can read,
   it offers the nearest one that does, labelled as that masjid's times and not
   its own. A PrayersConnect page or an iqamah iCal address work too.

@@ -318,6 +318,25 @@ check("a masjid whose position is not known is not accused of it", masjids.zone_
 astro.local_offset_hours = real_local_offset
 masjids.inspect = real_inspect
 
+text = masjids.confirmation({"kind": "exact", "name": "Erin Centre", "source": "mawaqit",
+                             "times": [("Fajr", "05:30"), ("Isha", "20:00")]})
+check("times from a data feed are shown too, and said to be a listing that can be out of date",
+      "from mawaqit.net" in text and "Fajr 5:30 AM" in text and "out of date" in text, text)
+text = masjids.confirmation({"kind": "exact", "name": "Erin Centre", "source": "mawaqit", "times": [("Fajr", "05:30")],
+                             "warning": "Fajr at 06:45 is not possible on this day here"})
+check("with the sun's objection, when it has one", "Note: Fajr at 06:45 is not possible" in text, text)
+OTTAWA = (45.42, -75.70)
+sun = astro.sun_today(OTTAWA[0], OTTAWA[1])
+fits = [("Fajr", sun[0] - 90), ("Dhuhr", sun[1] + 30), ("Asr", (sun[1] + sun[2]) / 2), ("Maghrib", sun[2] + 5),
+        ("Isha", sun[2] + 90)]
+hm = lambda m: "%02d:%02d" % divmod(int(round(m)), 60)   # noqa: E731
+check("times that fit the sun draw no objection",
+      masjids._sun_warning(OTTAWA, [(n, hm(m)) for n, m in fits]) == "", masjids._sun_warning(OTTAWA, [(n, hm(m)) for n, m in fits]))
+late = [(n, hm(m)) for n, m in fits]
+late[0] = ("Fajr", hm(sun[0] - 2))
+check("Fajr two minutes before sunrise does",
+      "Fajr" in masjids._sun_warning(OTTAWA, late), masjids._sun_warning(OTTAWA, late))
+check("and no position, no objection", masjids._sun_warning(None, late) == "")
 text = masjids.confirmation({"kind": "read", "name": "Erin Centre", "times": [("Fajr", "05:30"), ("Isha", "20:00")]})
 check("a reading is shown as a 12-hour clock, with a warning it may be wrong",
       "Fajr 5:30 AM" in text and "Isha 8:00 PM" in text and "check" in text, text)

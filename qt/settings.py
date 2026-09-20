@@ -955,10 +955,8 @@ class MasjidPicker(QtWidgets.QDialog):
         kind = proposal.get("kind")
         if kind == "none":
             self.status.setText("%s  Nothing was changed." % proposal.get("status", ""))
-        elif kind == "exact":
-            self.keep(proposal)
         else:
-            # Read off a web page, or a neighbour's: shown first.
+            # Whatever was found is shown first, and kept on a second press.
             self.pending = {"row": index, "proposal": proposal}
             self.status.setText(masjids_mod.confirmation(
                 proposal, bool(self.owner.s.get("use_24h"))))
