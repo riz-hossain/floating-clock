@@ -22,6 +22,7 @@ still knows today's times.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import re
@@ -158,7 +159,38 @@ def _rows(payload) -> list[dict]:
     return rows
 
 
-def resolve(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
+def probe(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> tuple[str, str]:
+    """(where the address really lives, "") when the site answers at all;
+    (the address, why not) when it does not.
+
+    A site that answers with an error page has answered -- the timetable API may
+    still be there behind a refusal of the home page. Only a site that cannot be
+    reached is given up on, and it is given up on in seconds: a host that does not
+    exist can otherwise cost minutes, since name lookup is not bound by a socket
+    timeout and every later step would wait its own turn to fail.
+    """
+    def go() -> tuple[str, str]:
+        request = urllib.request.Request(site_url, headers={"User-Agent": USER_AGENT})
+        try:
+            with (opener or urllib.request.urlopen)(request, timeout=timeout) as response:
+                return (getattr(response, "geturl", lambda: site_url)() or site_url), ""
+        except urllib.error.HTTPError:
+            return site_url, ""
+        except Exception as exc:
+            reason = getattr(exc, "reason", None) or exc
+            return site_url, (str(reason).strip()[:80] or exc.__class__.__name__)
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        return pool.submit(go).result(timeout=timeout + 3.0)
+    except concurrent.futures.TimeoutError:
+        return site_url, "no answer"
+    finally:
+        pool.shutdown(wait=False)
+
+
+def resolve(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None,
+            strict: bool = False) -> str:
     """Where an address really lives once its redirects are followed.
 
     Masjids very often own a vanity domain that simply redirects to the page
@@ -169,12 +201,10 @@ def resolve(site_url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
     refuse a *probe* that wanders off, but must not refuse a home page that
     the masjid itself sent us to.
     """
-    request = urllib.request.Request(site_url, headers={"User-Agent": USER_AGENT})
-    try:
-        with (opener or urllib.request.urlopen)(request, timeout=timeout) as response:
-            return getattr(response, "geturl", lambda: site_url)() or site_url
-    except Exception:
-        return site_url                   # unreachable: let the probes say so
+    final, problem = probe(site_url, timeout, opener)
+    if problem and strict:
+        raise DptError("could not reach the site (%s)" % problem)
+    return final                          # unreachable and not strict: let the probes say so
 
 
 def discover(site_url: str, opener=None, resolved: bool = False) -> str:

@@ -476,6 +476,7 @@ class SettingsDialog(QtWidgets.QDialog):
         if url == str(self.s.get("prayer_ics_url") or ""):
             return
         self.s["prayer_ics_url"] = url
+        masjids_mod.forget_place(self.s)        # a different address is a different place
         cfg.save(self.s)
         self.prayer_status.setText("Reading %s…" % (url or prayer_mod.SOURCE_NAME))
         self.clock.refresh_prayers(force=True)
@@ -825,6 +826,7 @@ class MasjidPicker(QtWidgets.QDialog):
         self.owner = owner
         self.rows: list = []
         self.busy = False
+        self.pending: dict | None = None       # a proposal shown and waiting for a second press
         self.setWindowTitle("Find your masjid")
         self.setMinimumSize(560, 460)
         self.setStyleSheet(owner.styleSheet())
@@ -832,21 +834,23 @@ class MasjidPicker(QtWidgets.QDialog):
         body = QtWidgets.QVBoxLayout(self)
         body.setContentsMargins(18, 16, 18, 16)
 
-        heading = QtWidgets.QLabel("Search by name or town")
+        heading = QtWidgets.QLabel("Search by town, address or name")
         heading.setObjectName("title")
         body.addWidget(heading)
 
         note = QtWidgets.QLabel(
-            "Masjids on mawaqit.net come with their congregation times. The "
-            "rest are from a directory that ships with the clock, and their "
-            "times depend on what their own website publishes.")
+            "Masjids on mawaqit.net come with their congregation times. For "
+            "the rest the clock reads the masjid's own website, the way you "
+            "would, and shows you what it read before keeping it. Where a "
+            "masjid publishes nothing readable, it can use the nearest one "
+            "that does. Map data © OpenStreetMap contributors.")
         note.setObjectName("muted")
         note.setWordWrap(True)
         body.addWidget(note)
 
         row = QtWidgets.QHBoxLayout()
         self.box = QtWidgets.QLineEdit()
-        self.box.setPlaceholderText("Waterloo, or your masjid's name")
+        self.box.setPlaceholderText("Calgary, a postal code, or your masjid's name")
         self.box.returnPressed.connect(self.look)
         row.addWidget(self.box, 1)
         search = QtWidgets.QPushButton("Search")
@@ -896,23 +900,21 @@ class MasjidPicker(QtWidgets.QDialog):
     def show_results(self, found, trouble: str) -> None:
         self.busy = False
         self.rows = found
+        self.pending = None
         self.listing.clear()
         for entry in found:
             label = "%s\n    %s" % (entry.get("name") or "",
                                     masjids_mod.describe(entry))
-            item = QtWidgets.QListWidgetItem(label)
-            if not masjids_mod.address_for(entry):
-                # Nothing to read times from, so it is shown but not inviting.
-                item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEnabled)
-            self.listing.addItem(item)
+            # A masjid with nothing to read is still pickable: the nearest one
+            # that has something can stand in for it.
+            self.listing.addItem(QtWidgets.QListWidgetItem(label))
         if trouble:
-            self.status.setText("Found %d. (mawaqit.net: %s)" % (len(found), trouble))
+            self.status.setText("Found %d. (%s)" % (len(found), trouble))
         elif found:
             self.status.setText(
                 "Found %d. Pick one, then press Use this masjid." % len(found))
         else:
-            self.status.setText(
-                "Nothing matched. Try the town instead of the masjid's name.")
+            self.status.setText("Nothing matched. Try the town, or a postal code.")
 
     def use(self) -> None:
         index = self.listing.currentRow()
@@ -921,36 +923,51 @@ class MasjidPicker(QtWidgets.QDialog):
             return
         if self.busy:
             return
-        entry = self.rows[index]
-        address = masjids_mod.address_for(entry)
-        name = str(entry.get("name") or "that masjid")
-        if not address:
-            self.status.setText("%s publishes no times the clock can read." % name)
+        if self.pending is not None and self.pending["row"] == index:
+            self.keep(self.pending["proposal"])        # the second press: they have seen it
             return
+        self.pending = None
+        entry = self.rows[index]
+        rows = list(self.rows)
+        name = str(entry.get("name") or "that masjid")
         # Prove it before saving it. Most masjid websites publish nothing the
         # clock can read, and saving one of those would replace times that
         # work with none at all.
         self.busy = True
         self.status.setText("Checking %s…" % name)
 
+        def progress(text: str) -> None:
+            ui.post(lambda: self.status.setText(text))
+
         def work() -> None:
             try:
-                prayers, status = masjids_mod.verify(address)
+                proposal = masjids_mod.propose(entry, rows, progress=progress)
             except Exception as exc:            # a check must never crash
-                prayers, status = [], str(exc)[:90] or exc.__class__.__name__
-            ui.post(lambda: self.verified(address, name, prayers, status))
+                proposal = {"kind": "none", "status": "%s: %s" % (
+                    name, str(exc)[:90] or exc.__class__.__name__)}
+            ui.post(lambda: self.proposed(index, proposal))
 
         threading.Thread(target=work, name="floating-clock-masjid-verify",
                          daemon=True).start()
 
-    def verified(self, address: str, name: str, prayers, status: str) -> None:
+    def proposed(self, index: int, proposal: dict) -> None:
         self.busy = False
-        if not prayers:
-            self.status.setText("%s: %s  Nothing was changed." % (
-                name, status.replace("Could not read the prayer times: ", "")))
-            return
-        self.owner.prayer_url.setText(address)
-        self.owner._set_prayer_url()
+        kind = proposal.get("kind")
+        if kind == "none":
+            self.status.setText("%s  Nothing was changed." % proposal.get("status", ""))
+        else:
+            # Whatever was found is shown first, and kept on a second press.
+            self.pending = {"row": index, "proposal": proposal}
+            self.status.setText(masjids_mod.confirmation(
+                proposal, bool(self.owner.s.get("use_24h"))))
+
+    def keep(self, proposal: dict) -> None:
+        """Save an accepted choice: the address, where it is, and whose it is."""
+        masjids_mod.apply(self.owner.s, proposal)
+        self.owner.prayer_url.setText(proposal["address"])
+        cfg.save(self.owner.s)
+        self.owner.prayer_status.setText("Reading %s…" % (proposal["name"] or proposal["address"]))
+        self.owner.clock.refresh_prayers(force=True)
         self.accept()
 
 

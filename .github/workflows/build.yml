@@ -69,6 +69,27 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-readers.py
+      - name: Reading a masjid's own web page, offline
+        # Every layout met on real masjid sites and every page that must be
+        # refused -- a placeholder table, June's times in September, a week of
+        # different days -- on made-up pages; the sun; the fetch on a made-up
+        # network. Nothing to flake.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-scrape.py
+      - name: Finding a masjid, offline
+        # The map, merging sources, and offering a nearby masjid's times when
+        # a masjid has none of its own -- labelled, never passed off as its own.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-discovery.py
+      - name: A page whose times a script writes in
+        # A real headless Chrome on a page served from this machine: the
+        # browser driver, and that nothing is left running afterwards.
+        env:
+          PYTHONPATH: stage
+          FLOATING_CLOCK_NO_SANDBOX: "1"
+        run: python packaging/check-render.py
       - name: Worker threads reach the UI
         # QTimer.singleShot from a plain thread is silently never called, which
         # left every Mac and Linux clock with no prayer times. This runs the

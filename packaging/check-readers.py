@@ -261,6 +261,13 @@ try:
     check("a prayersconnect page is found too",
           prayer._embedded_page("https://m.test/") ==
           "https://prayersconnect.com/mosques/12345-some-masjid")
+    serve('<a href="https://masjidbox.com/prayer-times/Umulqura">Prayer Times</a>'
+          '<script src="https://masjidbox.com/widgets/loader.js"></script>')
+    check("a masjidbox page is found too, and only its prayer-times page",
+          prayer._embedded_page("https://m.test/") == "https://masjidbox.com/prayer-times/umulqura")
+    serve('<a href="https://masjidbox.com/prayer-times/one-masjid">x</a>'
+          '<a href="https://masjidbox.com/prayer-times/another-masjid">y</a>')
+    check("two masjidbox pages linked means none is followed", prayer._embedded_page("https://m.test/") == "")
     serve("<html>nothing here</html>")
     check("a page that embeds nothing yields nothing", prayer._embedded_page("https://m.test/") == "")
 finally:

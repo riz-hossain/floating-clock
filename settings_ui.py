@@ -1001,21 +1001,23 @@ class SettingsUI(CalendarsPage):
         frame = tk.Frame(win, bg=p.window)
         frame.pack(fill="both", expand=True, padx=px(24), pady=(px(18), px(20)))
 
-        w.label(frame, ui, "Search by name or town", 10, "semibold").pack(anchor="w")
+        w.label(frame, ui, "Search by town, address or name", 10, "semibold").pack(anchor="w")
         w.label(
             frame, ui,
-            "Masjids on mawaqit.net come with their congregation times. The "
-            "rest are from a directory that ships with the clock, and their "
-            "times depend on what their own website publishes.",
+            "Masjids on mawaqit.net come with their congregation times. For "
+            "the rest the clock reads the masjid's own website, the way you "
+            "would, and shows you what it read before keeping it. Where a "
+            "masjid publishes nothing readable, it can use the nearest one "
+            "that does. Map data © OpenStreetMap contributors.",
             9, colour=p.muted, wraplength=px(520), justify="left",
         ).pack(anchor="w", pady=(px(2), px(8)))
 
         row = tk.Frame(frame, bg=p.window)
         row.pack(fill="x")
-        box = w.Field(row, ui, width=34, placeholder="Waterloo, or your masjid's name")
+        box = w.Field(row, ui, width=34, placeholder="Calgary, a postal code, or your masjid's name")
         box.pack(side="left", fill="x", expand=True)
 
-        state: dict = {"rows": [], "busy": False}
+        state: dict = {"rows": [], "busy": False, "pending": None}
 
         note = w.label(frame, ui, "", 9, colour=p.muted,
                        wraplength=px(520), justify="left")
@@ -1041,12 +1043,13 @@ class SettingsUI(CalendarsPage):
                 )
                 for index, entry in enumerate(found)
             ])
+            state["pending"] = None
             if trouble:
-                say("Found %d. (mawaqit.net: %s)" % (len(found), trouble))
+                say("Found %d. (%s)" % (len(found), trouble))
             elif found:
                 say("Found %d. Pick one, then press Use this masjid." % len(found))
             else:
-                say("Nothing matched. Try the town instead of the masjid's name.")
+                say("Nothing matched. Try the town, or a postal code.")
 
         def look(_event=None) -> None:
             text = box.get().strip()
@@ -1068,6 +1071,19 @@ class SettingsUI(CalendarsPage):
             threading.Thread(target=work, name="floating-clock-masjid-search",
                              daemon=True).start()
 
+        def keep(proposal: dict) -> None:
+            """Save an accepted choice: the address, where it is, and whose it is."""
+            masjids_mod.apply(self.s, proposal)
+            field = getattr(self, "prayer_url_field", None)
+            if field is not None and field.winfo_exists():
+                field.set(proposal["address"])
+            cfg.save(self.s)
+            label = getattr(self, "prayer_status_label", None)
+            if label is not None and label.winfo_exists():
+                label.configure(text="Reading %s…" % (proposal["name"] or proposal["address"]))
+            self.refresh_prayers()
+            win.destroy()
+
         def use() -> None:
             key = listing.selected_key
             if key is None:
@@ -1075,12 +1091,12 @@ class SettingsUI(CalendarsPage):
                 return
             if state["busy"]:
                 return
-            entry = state["rows"][int(key)]
-            address = masjids_mod.address_for(entry)
-            if not address:
-                say("%s publishes no times the clock can read."
-                    % (entry.get("name") or "That masjid"))
+            pending = state["pending"]
+            if pending is not None and pending["key"] == key:
+                keep(pending["proposal"])              # the second press: they have seen it
                 return
+            state["pending"] = None
+            entry = state["rows"][int(key)]
             name = str(entry.get("name") or "that masjid")
             # Prove it before saving it. Most masjid websites publish nothing
             # the clock can read, and saving one of those would replace times
@@ -1088,29 +1104,34 @@ class SettingsUI(CalendarsPage):
             state["busy"] = True
             say("Checking %s…" % name)
 
+            def progress(text: str) -> None:
+                try:
+                    self.root.after(0, say, text)
+                except Exception:
+                    pass
+
             def work() -> None:
                 try:
-                    prayers, status = masjids_mod.verify(address)
+                    proposal = masjids_mod.propose(entry, state["rows"], progress=progress)
                 except Exception as exc:        # a check must never crash
-                    prayers, status = [], str(exc)[:90] or exc.__class__.__name__
+                    proposal = {"kind": "none", "status": "%s: %s" % (
+                        name, str(exc)[:90] or exc.__class__.__name__)}
                 try:
-                    self.root.after(0, done, address, name, prayers, status)
+                    self.root.after(0, done, key, proposal)
                 except Exception:
                     state["busy"] = False
 
-            def done(address, name, prayers, status) -> None:
+            def done(key, proposal) -> None:
                 state["busy"] = False
                 if not win.winfo_exists():
                     return
-                if not prayers:
-                    say("%s: %s  Nothing was changed." % (name, status.replace(
-                        "Could not read the prayer times: ", "")))
-                    return
-                field = getattr(self, "prayer_url_field", None)
-                if field is not None and field.winfo_exists():
-                    field.set(address)
-                self._set_prayer_url()
-                win.destroy()
+                kind = proposal.get("kind")
+                if kind == "none":
+                    say("%s  Nothing was changed." % proposal.get("status", ""))
+                else:
+                    # Whatever was found is shown first, and kept on a second press.
+                    state["pending"] = {"key": key, "proposal": proposal}
+                    say(masjids_mod.confirmation(proposal, bool(self.s.get("use_24h"))))
 
             threading.Thread(target=work, name="floating-clock-masjid-verify",
                              daemon=True).start()
@@ -1356,6 +1377,7 @@ class SettingsUI(CalendarsPage):
             self._refresh_prayers_now()
             return
         self.s["prayer_ics_url"] = url
+        masjids_mod.forget_place(self.s)        # a different address is a different place
         cfg.save(self.s)
         label = getattr(self, "prayer_status_label", None)
         if label is not None and label.winfo_exists():
