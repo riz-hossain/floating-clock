@@ -1073,17 +1073,47 @@ class SettingsUI(CalendarsPage):
             if key is None:
                 say("Pick one from the list first.")
                 return
+            if state["busy"]:
+                return
             entry = state["rows"][int(key)]
             address = masjids_mod.address_for(entry)
             if not address:
-                say("%s has no website on record, so the clock has nowhere to "
-                    "read its times from." % entry.get("name"))
+                say("%s publishes no times the clock can read."
+                    % (entry.get("name") or "That masjid"))
                 return
-            field = getattr(self, "prayer_url_field", None)
-            if field is not None and field.winfo_exists():
-                field.set(address)
-            self._set_prayer_url()
-            win.destroy()
+            name = str(entry.get("name") or "that masjid")
+            # Prove it before saving it. Most masjid websites publish nothing
+            # the clock can read, and saving one of those would replace times
+            # that work with none at all.
+            state["busy"] = True
+            say("Checking %s…" % name)
+
+            def work() -> None:
+                try:
+                    prayers, status = masjids_mod.verify(address)
+                except Exception as exc:        # a check must never crash
+                    prayers, status = [], str(exc)[:90] or exc.__class__.__name__
+                try:
+                    self.root.after(0, done, address, name, prayers, status)
+                except Exception:
+                    state["busy"] = False
+
+            def done(address, name, prayers, status) -> None:
+                state["busy"] = False
+                if not win.winfo_exists():
+                    return
+                if not prayers:
+                    say("%s: %s  Nothing was changed." % (name, status.replace(
+                        "Could not read the prayer times: ", "")))
+                    return
+                field = getattr(self, "prayer_url_field", None)
+                if field is not None and field.winfo_exists():
+                    field.set(address)
+                self._set_prayer_url()
+                win.destroy()
+
+            threading.Thread(target=work, name="floating-clock-masjid-verify",
+                             daemon=True).start()
 
         box.entry.bind("<Return>", look)
         w.Button(row, ui, "Search", command=look, kind="primary",

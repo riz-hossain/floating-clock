@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -74,6 +75,17 @@ NIGHTLY_AT = (2, 30)
 # times at all -- a laptop waking to no network must not wait a whole day.
 REFRESH_RETRY_MINUTES = 15.0
 EMPTY_RETRY_MINUTES = 5.0
+# A source that keeps failing is asked less and less often, up to this far
+# apart. Five minutes was right for a network still waking up and wrong for a
+# masjid whose site will never answer: nearly three hundred attempts a day,
+# each several requests, to what is often a community's shared host.
+MAX_RETRY_MINUTES = 360.0
+
+
+def retry_gap(failures: int, have_prayers: bool) -> float:
+    """Minutes to wait before trying again, doubling with each failure in a row."""
+    base = REFRESH_RETRY_MINUTES if have_prayers else EMPTY_RETRY_MINUTES
+    return min(MAX_RETRY_MINUTES, base * (2 ** max(0, failures - 1)))
 # What feeds call them -> the name shown here. Spellings vary by mosque, so
 # match on any word of the title: "Jumaa Iqama", "Salat al-Fajr", "Isha'a".
 _ALIASES = {
@@ -419,14 +431,115 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
                 return [], "The prayer calendar came back empty."
 
     prayers = parse(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS))
+    prayers, doubtful = screen(prayers)
     if not prayers:
-        return [], note or "No prayer times found in that calendar."
+        return [], note or doubtful or "No prayer times found in that calendar."
     if note:
         return prayers, note
     last = max(prayer.iqama for prayer in prayers)
     return prayers, "%s · updated %s · times through %s." % (
         source_label(url, text), _ago(age or 0.0), last.strftime("%a %d %b"),
     )
+
+
+# Where each iqama can fall on a masjid's own clock, in any month, anywhere in
+# Canada -- minutes after midnight. Wide on purpose: this does not judge a
+# masjid's choices, only whether what arrived is a prayer timetable at all.
+# A masjid whose plugin was installed and never configured publishes Fajr at
+# 00:57 and Asr at 11:10, and without this the clock would show it.
+PLAUSIBLE = {
+    "Fajr": (2 * 60 + 30, 8 * 60 + 15),
+    "Dhuhr": (11 * 60 + 30, 15 * 60),
+    "Jumuah": (11 * 60 + 30, 16 * 60 + 30),
+    "Asr": (13 * 60 + 30, 19 * 60 + 45),
+    "Maghrib": (16 * 60, 22 * 60 + 45),
+    "Isha": (17 * 60 + 30, 23 * 60 + 59),
+}
+_DAY_ORDER = ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
+
+
+def screen(prayers) -> tuple[list, str]:
+    """(kept, complaint): the iqamas that could be real, and why any were not.
+
+    A time outside its prayer's window is dropped on its own. A day whose
+    five do not run in order is dropped whole, since if two are wrong the
+    rest cannot be trusted either. The complaint is a sentence for the
+    settings page, empty when nothing was wrong.
+
+    One typo should not cost a whole timetable, but a source where most of
+    the times are impossible is not a timetable with typos in it -- it is
+    broken, and what survives (a Jumuah read from somewhere else, say) would
+    sit under a healthy "updated just now" while four prayers in five went
+    missing. That is refused outright.
+    """
+    complaint = ""
+    kept = []
+    considered = sum(1 for item in prayers if item.name in PLAUSIBLE)
+    for item in prayers:
+        window = PLAUSIBLE.get(item.name)
+        if window:
+            minute = item.iqama.hour * 60 + item.iqama.minute
+            if not window[0] <= minute <= window[1]:
+                if not complaint:
+                    complaint = (
+                        "Those times do not look like prayer times (%s at %s), so the "
+                        "clock is not using them. The masjid's own timetable may be "
+                        "set up wrongly." % (item.name, item.time_text(True)))
+                continue
+        kept.append(item)
+
+    by_day: dict = {}
+    for item in kept:
+        name = "Dhuhr" if item.name == "Jumuah" else item.name
+        if name in _DAY_ORDER:
+            by_day.setdefault(item.iqama.date(), {})[name] = item.iqama
+    bad_days = set()
+    for day, times in by_day.items():
+        run = [times[n] for n in _DAY_ORDER if n in times]
+        if len(run) >= 2 and any(a >= b for a, b in zip(run, run[1:])):
+            bad_days.add(day)
+    if bad_days:
+        if not complaint:
+            complaint = ("That timetable has prayers out of order on %s, so the clock "
+                         "is not using it." % min(bad_days).strftime("%a %d %b"))
+        kept = [i for i in kept
+                if not (i.iqama.date() in bad_days
+                        and ("Dhuhr" if i.name == "Jumuah" else i.name) in _DAY_ORDER)]
+    dropped = sum(1 for item in prayers if item.name in PLAUSIBLE) - sum(
+        1 for item in kept if item.name in PLAUSIBLE)
+    if complaint:
+        log.warning("Prayer times: %s (%d of %d dropped)", complaint, dropped, considered)
+    if considered and dropped * 4 > considered:
+        return [], complaint
+    return kept, complaint
+
+
+_LINK_MAWAQIT = re.compile(
+    r"mawaqit\.net/(?:[a-z]{2}/)?(?:[mw]/)?([a-z0-9][a-z0-9-]{5,})", re.I)
+_LINK_PRAYERSCONNECT = re.compile(
+    r"prayersconnect\.com/mosques/([a-z0-9][a-z0-9-]{5,})", re.I)
+
+
+def _embedded_page(home: str) -> str:
+    """The one masjid page on a platform we read that this site embeds, or "".
+
+    Exactly one, and only one: a page that links several is pointing at other
+    masjids rather than saying it is one of them, and reading the wrong
+    masjid's times is worse than reading none. The settings page names whose
+    times were read, so a wrong guess would at least be visible.
+    """
+    try:
+        request = urllib.request.Request(home, headers={"User-Agent": dpt.USER_AGENT})
+        with urllib.request.urlopen(request, timeout=dpt.FETCH_TIMEOUT) as response:
+            html = response.read(600_000).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    found = {}
+    for match in _LINK_MAWAQIT.finditer(html):
+        found[mawaqit.page_url(match.group(1).lower())] = True
+    for match in _LINK_PRAYERSCONNECT.finditer(html):
+        found["https://prayersconnect.com/mosques/" + match.group(1).lower()] = True
+    return next(iter(found)) if len(found) == 1 else ""
 
 
 def _fetcher_for(url: str):
@@ -444,9 +557,25 @@ def _fetcher_for(url: str):
         return ics.fetch
 
     def fetch_site(address: str) -> str:
+        # A vanity domain can redirect into a platform we read directly, so
+        # settle where it really lives before deciding how to read it.
+        home = dpt.resolve(address)
+        if mawaqit.looks_like(home):
+            return mawaqit.fetch(home)
+        if prayersconnect.looks_like(home):
+            return prayersconnect.fetch(home)
         try:
-            return dpt.fetch(address)
+            return dpt.fetch(home, resolved=True)
         except dpt.NoApi as no_api:
+            # No plugin API, but the site may embed a page on a platform we do
+            # read. Many masjids do exactly that with a mawaqit widget.
+            linked = _embedded_page(home)
+            if linked:
+                try:
+                    reader = mawaqit if mawaqit.looks_like(linked) else prayersconnect
+                    return reader.fetch(linked)
+                except Exception:
+                    log.info("Prayer times: the page embedded at %s did not read", linked)
             # No timetable API there at all, so it may still be a calendar.
             # A site that has one but nothing usable in it keeps its own
             # message, which says more than a calendar parser's would.
@@ -514,7 +643,8 @@ def last_nightly(now: datetime) -> datetime:
     return slot if slot <= now else slot - timedelta(days=1)
 
 
-def refresh_due(now: datetime, last_ok, last_try, have_prayers: bool) -> bool:
+def refresh_due(now: datetime, last_ok, last_try, have_prayers: bool,
+                failures: int = 0) -> bool:
     """Whether to fetch the masjid's calendar again right now.
 
     Once a night after 02:30; straight away after a night the PC was off or
@@ -522,7 +652,7 @@ def refresh_due(now: datetime, last_ok, last_try, have_prayers: bool) -> bool:
     all; and never more often than the retry gap, so a feed that is down is
     asked politely rather than hammered.
     """
-    gap = EMPTY_RETRY_MINUTES if not have_prayers else REFRESH_RETRY_MINUTES
+    gap = retry_gap(failures, have_prayers)
     if last_try is not None and now - last_try < timedelta(minutes=gap):
         return False
     if not have_prayers or last_ok is None:
@@ -583,6 +713,7 @@ class Loader:
         self.loading = False
         self.last_try: datetime | None = None
         self.next_check: datetime | None = None
+        self.failures = 0                 # attempts in a row that found nothing
 
     def _dir(self) -> str:
         return self.base_dir() if callable(self.base_dir) else self.base_dir
@@ -592,7 +723,7 @@ class Loader:
         """Read the times at startup, fetching fresh ones when the saved copy
         predates last night's check."""
         stale = refresh_due(datetime.now(), checked_at(self._dir()), None, True)
-        self.refresh(force=stale)
+        self._start(force=stale)
 
     def poll(self, now: datetime) -> None:
         """The nightly look at the masjid's calendar, and every catch-up."""
@@ -601,11 +732,19 @@ class Loader:
         if self.next_check is not None and now < self.next_check:
             return
         self.next_check = now + CHECK_EVERY
-        if refresh_due(now, checked_at(self._dir()), self.last_try, bool(self.prayers)):
+        if refresh_due(now, checked_at(self._dir()), self.last_try,
+                       bool(self.prayers), self.failures):
             log.info("Checking %s's calendar for changes", SOURCE_NAME)
-            self.refresh(force=True)
+            self._start(force=True)
 
     def refresh(self, force: bool = True) -> None:
+        """Read the times now, because somebody asked -- a new address, or the
+        Refresh button. Starts the backing-off over: a person who has just
+        changed something should not be made to wait out the last failure."""
+        self.failures = 0
+        self._start(force)
+
+    def _start(self, force: bool = True) -> None:
         """Read the times on a worker: a feed that is slow, or a masjid whose
         site is down, must never hold up the clock's own loop."""
         if not self.s.get("prayer_enabled", True):
@@ -638,6 +777,8 @@ class Loader:
     # --- back on the UI thread ---------------------------------------------
     def _done(self, found, status: str) -> None:
         self.loading = False
+        # Nothing found, or the load itself blew up: one more in a row.
+        self.failures = 0 if found else self.failures + 1
         if found is None:
             return
         previous = list(self.prayers or ())

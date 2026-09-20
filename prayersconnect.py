@@ -103,6 +103,7 @@ def fetch(url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
     return json.dumps({
         "source": "prayersconnect",
         "name": str(mosque.get("name") or ""),
+        "timezone": str(mosque.get("timezone") or ""),
         "iqamah": kept,
         "jumuah": _jumuah(mosque),
     })
@@ -125,13 +126,14 @@ def _jumuah(mosque: dict):
     return None
 
 
-def _local(stamp: str) -> datetime | None:
-    """An ISO instant in this machine's own time.
+def _local(stamp: str, zone: str = "") -> datetime | None:
+    """An ISO instant as the masjid's own wall clock.
 
-    The site answers in UTC. Showing it in local time is right for the case
-    that matters -- somebody following the masjid they pray at -- and simply
-    wrong for somebody following one in another country, which is why the
-    settings page names the masjid it read.
+    The site answers in UTC. Every other reader here hands back the masjid's
+    own clock -- what its website shows and what the plausibility screen is
+    written for -- so this converts to the masjid's timezone, and only falls
+    back to this machine's when that timezone is not available (Windows
+    ships no timezone database of its own).
     """
     text = str(stamp or "").strip()
     if not text:
@@ -142,7 +144,15 @@ def _local(stamp: str) -> datetime | None:
         return None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone().replace(tzinfo=None)
+    target = None
+    if zone:
+        try:
+            from zoneinfo import ZoneInfo
+
+            target = ZoneInfo(zone)
+        except Exception:
+            target = None
+    return moment.astimezone(target).replace(tzinfo=None)
 
 
 def parse(text: str, window_start: datetime, window_end: datetime) -> list:
@@ -156,11 +166,12 @@ def parse(text: str, window_start: datetime, window_end: datetime) -> list:
         log.warning("The cached prayersconnect timetable is not readable JSON")
         return []
     iqamah = data.get("iqamah") or {}
-    jumuah = _local(data.get("jumuah"))
+    zone = str(data.get("timezone") or "")
+    jumuah = _local(data.get("jumuah"), zone)
 
     found = []
     for key, name in PRAYERS:
-        when = _local(iqamah.get(key))
+        when = _local(iqamah.get(key), zone)
         if when is None:
             continue
         if name == "Dhuhr" and when.weekday() == FRIDAY and jumuah:

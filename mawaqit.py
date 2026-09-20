@@ -77,8 +77,9 @@ def slug_from(url: str) -> str:
         return text.strip("/")
     path = urllib.parse.urlsplit(text if "//" in text else "//" + text).path
     parts = [p for p in path.split("/") if p]
-    # Drop a leading language code, and the /m/ some links carry.
-    while parts and (len(parts[0]) == 2 or parts[0] == "m"):
+    # Drop a leading language code, and the /m/ (masjid) or /w/ (widget) some
+    # links carry -- a masjid's own site usually embeds the widget form.
+    while parts and (len(parts[0]) == 2 or parts[0] in ("m", "w")):
         parts.pop(0)
     return parts[0] if parts else ""
 
@@ -142,6 +143,9 @@ def search(word: str = "", lat: float | None = None, lon: float | None = None,
             "latitude": item.get("latitude"),
             "longitude": item.get("longitude"),
             "site": str(item.get("site") or "").strip(),
+            # A masjid can switch its congregation times off. What is left in
+            # its table then is a leftover, not something it publishes.
+            "iqama": item.get("iqamaEnabled") is not False,
             "source": "mawaqit",
         })
     return found
@@ -195,6 +199,14 @@ def fetch(url_or_slug: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
     iqama_calendar = conf.get("iqamaCalendar")
     if not isinstance(calendar, list) or not isinstance(iqama_calendar, list):
         raise MawaqitError("that masjid has no timetable on mawaqit yet")
+    if conf.get("iqamaEnabled") is False:
+        raise MawaqitError(
+            "that masjid has switched its congregation times off on mawaqit, so "
+            "there is nothing for the clock to follow")
+    if start_is_iqama(calendar, iqama_calendar):
+        raise MawaqitError(
+            "that masjid's mawaqit page lists prayer start times but no "
+            "congregation times, so there is nothing for the clock to follow")
     return json.dumps({
         "source": "mawaqit",
         "slug": slug,
@@ -206,6 +218,34 @@ def fetch(url_or_slug: str, timeout: float = FETCH_TIMEOUT, opener=None) -> str:
         "jumua3": conf.get("jumua3"),
         "jumuaAsDuhr": bool(conf.get("jumuaAsDuhr")),
     })
+
+
+def start_is_iqama(calendar, iqama_calendar) -> bool:
+    """Whether the iqama table just says "at the adhan" all year.
+
+    Four of five prayers at +0 (or at the very minute of the adhan) on nearly
+    every day is a table nobody filled in. One at +0 -- Maghrib -- is normal.
+    """
+    days = unset = 0
+    for month, table in enumerate(iqama_calendar, 1):
+        if not isinstance(table, dict):
+            continue
+        for day, entries in table.items():
+            if not isinstance(entries, (list, tuple)) or len(entries) < 5:
+                continue
+            days += 1
+            adhan = _month_day(calendar, month, int(day)) if str(day).isdigit() else None
+            same = 0
+            for slot, (_name, index) in enumerate(IQAMA_ORDER):
+                entry = str(entries[slot]).strip()
+                if _offset(entry) == 0 or entry in ("0", "+0", "-0"):
+                    same += 1
+                elif (isinstance(adhan, (list, tuple)) and index < len(adhan)
+                      and _clock(entry) and _clock(entry) == _clock(adhan[index])):
+                    same += 1
+            if same >= 4:
+                unset += 1
+    return days > 0 and unset / days >= 0.9
 
 
 # --- reading it -------------------------------------------------------------

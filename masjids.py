@@ -183,10 +183,32 @@ def address_for(entry: dict) -> str:
     """
     if not isinstance(entry, dict):
         return ""
+    if entry.get("iqama") is False:
+        return ""                       # switched off: nothing to read
     slug = str(entry.get("slug") or "").strip()
     if slug:
         return mawaqit.page_url(slug)
     return str(entry.get("website") or entry.get("site") or "").strip()
+
+
+def verify(address: str) -> tuple[list, str]:
+    """(prayers, status) read exactly as the clock will read them.
+
+    Into a scratch folder, so nothing is saved and the times already in use
+    are untouched. The picker runs this before it commits a choice: most
+    masjid websites publish nothing the clock can read, and saving one of
+    those would replace a setup that works with one that shows no times.
+    """
+    import shutil
+    import tempfile
+
+    from . import prayer
+
+    folder = tempfile.mkdtemp(prefix="floating-clock-verify-")
+    try:
+        return prayer.load(folder, address, force=True)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def describe(entry: dict) -> str:
@@ -196,7 +218,9 @@ def describe(entry: dict) -> str:
                       if part)
     if not where:
         where = str(entry.get("localisation") or "").strip()
-    if entry.get("slug"):
+    if entry.get("iqama") is False:
+        note = "does not publish congregation times on mawaqit"
+    elif entry.get("slug"):
         note = "times from mawaqit.net"
     elif address_for(entry):
         note = "times from its website, if it publishes them"
