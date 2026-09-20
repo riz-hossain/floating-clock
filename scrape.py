@@ -298,6 +298,9 @@ _NEAR = 16          # lines from one prayer's name to the next
 _SPAN = 6           # lines a prayer's own times can be spread over
 _HEADER = 6         # lines above the first name that can hold column headings
 _HEADING_CHARS = 40  # a line longer than this is prose, not a column heading
+_ABOVE = 5           # lines above a block a heading may sit in, before a day picker is walked back over
+_PICKER_CHARS = 44   # a day tab is short; a paragraph that happens to hold a date is not one
+_PICKER_GAP = 2      # two lines with no date end a strip of tabs; a widget puts a Hijri date under each
 # An instruction is not a heading either. "For Current Iqama Times Select [your branch]" points at
 # iqama times that are somewhere else, and the list under it is the city's prayer times: counting
 # it as the "iqama column" read start times as iqamas (one Vancouver association's home page, in a
@@ -797,6 +800,29 @@ def _valid(year: int, month: int, day: int) -> bool:
         return False
 
 
+def _heading_from(lines: list[str], first: int, today: date) -> int:
+    """Where a block's heading may start.
+
+    A few lines above it, normally. But a widget that prints today's times under a
+    strip of day tabs -- Sunday, Monday ... Saturday, each on its own line with its
+    Hijri date beneath -- puts today's own date a dozen lines up, and reading only
+    the near end of that strip makes a widget showing today look like next
+    Saturday's and refuses it. So the window is walked back over a run of short
+    lines that hold no times and no prayer names, which is what such a strip is.
+    """
+    start = max(0, first - _ABOVE)
+    since_date = 0
+    while start > 0 and since_date <= _PICKER_GAP:
+        text = lines[start - 1]
+        if len(text) > _PICKER_CHARS or _TIME_RE.search(text):
+            break
+        if any(_NAME_RE[p].search(text) for p in DAILY):
+            break
+        since_date = 0 if _line_dates(text, "above", today) else since_date + 1
+        start -= 1
+    return start
+
+
 def _dates_near(lines: list[str], first: int, last: int, today: date) -> list:
     """What the page says about which days the block at lines first..last is for.
 
@@ -804,7 +830,7 @@ def _dates_near(lines: list[str], first: int, last: int, today: date) -> list:
     likely heads the next block, so only a "changes on" says anything there.
     """
     found = []
-    for lo, hi, where in ((max(0, first - 5), first, "above"),
+    for lo, hi, where in ((_heading_from(lines, first, today), first, "above"),
                           (first, last + 1, "inside"),
                           (last + 1, last + 4, "below")):
         for n in range(lo, min(hi, len(lines))):
