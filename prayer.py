@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import dpt, ics, mawaqit, prayersconnect
+from . import dpt, ics, mawaqit, prayersconnect, scrape, webrender
 
 log = logging.getLogger(__name__)
 
@@ -402,13 +402,16 @@ def _ago(hours: float) -> str:
 
 
 def load(base_dir: str, url: str = "", now: datetime | None = None,
-         force: bool = False, fetcher=None) -> tuple[list[Prayer], str]:
+         force: bool = False, fetcher=None, where=None) -> tuple[list[Prayer], str]:
     """(prayers, status) -- from the saved copy while it is fresh, from the
     feed when it is not, and from the saved copy again when the feed cannot
-    be reached. `status` is one plain sentence for the settings page."""
+    be reached. `status` is one plain sentence for the settings page.
+
+    `where` is the masjid's (latitude, longitude), when known. It is only used
+    to check a reading taken off a web page against the sun."""
     now = now or datetime.now()
     url = (url or "").strip() or WATERLOO_MASJID_ICS
-    fetcher = fetcher or _fetcher_for(url)
+    fetcher = fetcher or _fetcher_for(url, where)
     path = cache_path(base_dir)
     text = _read(path)
     age = age_hours(path)
@@ -542,12 +545,22 @@ def _embedded_page(home: str) -> str:
     return next(iter(found)) if len(found) == 1 else ""
 
 
-def _fetcher_for(url: str):
+def _renderer():
+    """A function that opens a page in a real browser, or None on a machine with none."""
+    return webrender.html_of if webrender.available() else None
+
+
+def _fetcher_for(url: str, where=None):
     """The reader for this address.
 
     A mosque website is tried as a timetable API first and as a calendar
     afterwards, because an ICS feed does not always end in .ics -- so the
     fallback costs one failed probe and saves a confusing error.
+
+    When it is neither -- most of them -- the page itself is read, the way a
+    person reads it: see scrape.py. That is the last resort and the least
+    certain, which is why the masjid picker shows what was read before it is
+    kept.
     """
     if mawaqit.looks_like(url):
         return mawaqit.fetch
@@ -582,10 +595,17 @@ def _fetcher_for(url: str):
             try:
                 return ics.fetch(address)
             except Exception:
-                # Neither worked. "that address did not return a calendar" is
-                # true but unhelpful for someone who pasted a mosque's
-                # website; the first message tells them what to do next.
-                raise dpt.NoApi(str(no_api)) from None
+                pass
+            # Not a calendar either. Read what the page says.
+            try:
+                return scrape.fetch(home, where=where, render=_renderer())
+            except scrape.ScrapeError as scraped:
+                # "that address did not return a calendar" is true but unhelpful
+                # for someone who pasted a mosque's website; say what was
+                # tried and what to do next.
+                raise dpt.NoApi(
+                    "%s. Its mawaqit.net page, or an iqamah calendar address "
+                    "from the masjid, would work" % scraped) from None
 
     return fetch_site
 
@@ -594,6 +614,7 @@ def _fetcher_for(url: str):
 _READERS = {
     "mawaqit": mawaqit,
     "prayersconnect": prayersconnect,
+    "scrape": scrape,
 }
 
 
@@ -625,6 +646,20 @@ def source_label(url: str, text: str) -> str:
 def _reason(exc: Exception) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     return text[:90]
+
+
+def position(settings: dict):
+    """(latitude, longitude) of the chosen masjid from the settings, or None."""
+    lat, lon = settings.get("prayer_lat"), settings.get("prayer_lon")
+    if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+        return float(lat), float(lon)
+    return None
+
+
+def proxy_status(status: str, asked: str) -> str:
+    """The status line, with the fact that these are not the masjid's own times."""
+    return "Approximate: %s publishes no times the clock can read, so these are a nearby masjid's. %s" % (
+        asked, status)
 
 
 # --- keeping the times current ---------------------------------------------
@@ -722,6 +757,10 @@ class Loader:
     def start(self) -> None:
         """Read the times at startup, fetching fresh ones when the saved copy
         predates last night's check."""
+        # A browser left running by a read that was cut short would otherwise
+        # stay there until the next restart of the machine.
+        threading.Thread(target=webrender.sweep_stale, name="floating-clock-sweep",
+                         daemon=True).start()
         stale = refresh_due(datetime.now(), checked_at(self._dir()), None, True)
         self._start(force=stale)
 
@@ -758,11 +797,15 @@ class Loader:
         self.last_try = datetime.now()
         url = str(self.s.get("prayer_ics_url", "") or "")
         base = self._dir()
+        where = position(self.s)
+        proxy_for = str(self.s.get("prayer_proxy_for") or "")
 
         def work() -> None:
             found, status = None, ""
             try:
-                found, status = load(base, url, force=force)
+                found, status = load(base, url, force=force, where=where)
+                if found and proxy_for:
+                    status = proxy_status(status, proxy_for)
             except Exception:
                 log.warning("Could not load the prayer times", exc_info=True)
             finally:

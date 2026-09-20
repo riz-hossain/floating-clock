@@ -56,7 +56,7 @@ def spin(seconds: float, until) -> bool:
 
 soon = datetime.now() + timedelta(hours=1)
 FOUND = ([prayer.Prayer("Fajr", soon)], "Test Masjid · updated just now")
-prayer.load = lambda base, url="", now=None, force=False, fetcher=None: FOUND
+prayer.load = lambda base, url="", now=None, force=False, fetcher=None, **kw: FOUND
 masjids.search = lambda text="", *a, **k: ([{
     "name": "Test Masjid", "city": "Waterloo, Ontario", "slug": "test-masjid",
     "source": "mawaqit", "iqama": True}], "")
@@ -94,7 +94,7 @@ check("its address is now the one in use",
       "box %r" % dialog.prayer_url.text())
 
 print("a masjid that cannot be read")
-prayer.load = lambda base, url="", now=None, force=False, fetcher=None: (
+prayer.load = lambda base, url="", now=None, force=False, fetcher=None, **kw: (
     [], "Could not read the prayer times: that site does not publish a timetable.")
 kept = dialog.prayer_url.text()
 again = MasjidPicker(dialog)
@@ -111,6 +111,53 @@ check("says nothing was changed", "Nothing was changed" in again.status.text(),
 check("and leaves the address that works exactly as it was",
       dialog.prayer_url.text() == kept and clock.s["prayer_ics_url"] == kept,
       "box %r" % dialog.prayer_url.text())
+
+PROPOSAL = {
+    "kind": "read", "address": "http://erin.example", "name": "Erin Centre", "how": "guessed",
+    "source": "scrape", "status": "read", "asked": "", "km": None, "latitude": 43.77, "longitude": -80.06,
+    "times": [("Fajr", "05:30"), ("Dhuhr", "14:00"), ("Asr", "18:00"), ("Maghrib", "19:22"), ("Isha", "20:00")]}
+
+
+def choose(proposal):
+    masjids.propose = lambda entry, rows, progress=None, **k: dict(proposal)
+    picker = MasjidPicker(dialog)
+    picker.box.setText("waterloo")
+    picker.look()
+    spin(10, lambda: picker.listing.count() > 0)
+    picker.listing.setCurrentRow(0)
+    picker.use()
+    return picker
+
+
+print("a reading taken off a web page is shown before it is kept")
+prayer.load = lambda base, url="", now=None, force=False, fetcher=None, **kw: FOUND
+kept = clock.s["prayer_ics_url"]
+picker = choose(PROPOSAL)
+check("the five times read are shown", spin(10, lambda: "Read from Erin Centre" in picker.status.text()),
+      picker.status.text())
+check("and nothing is saved yet", clock.s["prayer_ics_url"] == kept and picker.result() != picker.DialogCode.Accepted)
+picker.use()
+check("a second press keeps them", spin(10, lambda: picker.result() == picker.DialogCode.Accepted))
+check("the address, where the masjid is, and its name are saved",
+      clock.s["prayer_ics_url"] == "http://erin.example" and clock.s["prayer_lat"] == 43.77
+      and clock.s["prayer_masjid_name"] == "Erin Centre" and clock.s["prayer_proxy_for"] == "")
+
+print("a neighbour's times are labelled as one's")
+picker = choose(dict(PROPOSAL, kind="proxy", name="Nearer Masjid", asked="Erin Centre", km=1.1,
+                     address="http://nearer.example", latitude=43.78))
+check("the neighbour is named, and the masjid it stands in for",
+      spin(10, lambda: "Nearer Masjid's times, not Erin Centre's" in picker.status.text()), picker.status.text())
+check("and nothing is saved yet", clock.s["prayer_ics_url"] == "http://erin.example")
+picker.use()
+check("a second press keeps them, and the settings say whose they really are",
+      spin(10, lambda: picker.result() == picker.DialogCode.Accepted)
+      and clock.s["prayer_ics_url"] == "http://nearer.example" and clock.s["prayer_proxy_for"] == "Erin Centre")
+
+print("an address typed by hand is not a place the picker knew")
+dialog.prayer_url.setText("http://elsewhere.example")
+dialog._set_prayer_url()
+check("forgets where the masjid was, and that it was borrowed",
+      clock.s["prayer_lat"] is None and clock.s["prayer_proxy_for"] == "" and clock.s["prayer_masjid_name"] == "")
 
 print()
 if failures:

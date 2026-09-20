@@ -62,6 +62,14 @@ DEFAULTS: dict = {
     "prayer_enabled": True,
     "prayer_lead_minutes": 5,
     "prayer_ics_url": "",
+    # Where that masjid is, so that times read off its web page can be checked
+    # against the sun; and, when it publishes none the clock can read, whose
+    # times these stand in for. Set together by the masjid picker, cleared
+    # together when the address is changed by hand.
+    "prayer_lat": None,
+    "prayer_lon": None,
+    "prayer_masjid_name": "",
+    "prayer_proxy_for": "",
     "prayer_show_minutes": 60,
     # No assistant lets you edit a routine's time from outside, so the clock
     # fires a trigger URL instead: the routine's "when" becomes that trigger
@@ -281,8 +289,15 @@ def sanitise(data: dict) -> dict:
     if not isinstance(data["theme"], str):
         data["theme"] = DEFAULTS["theme"]
     for key in ("google_client_id", "google_client_secret", "prayer_ics_url",
-                "prayer_cast_device", "prayer_cast_media_default"):
+                "prayer_cast_device", "prayer_cast_media_default",
+                "prayer_masjid_name", "prayer_proxy_for"):
         data[key] = str(data.get(key) or "").strip()
+    for key, low, high in (("prayer_lat", -66.0, 66.0), ("prayer_lon", -180.0, 180.0)):
+        try:
+            value = float(data.get(key))
+            data[key] = value if low <= value <= high else None
+        except (TypeError, ValueError):
+            data[key] = None
     if data["ui_mode"] not in ("auto", "dark", "light"):
         data["ui_mode"] = DEFAULTS["ui_mode"]
     if data["bar_mode"] not in ("day", "meeting", "seconds"):

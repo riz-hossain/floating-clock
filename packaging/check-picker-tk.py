@@ -38,7 +38,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 
 soon = datetime.now() + timedelta(hours=1)
-prayer.load = lambda base, url="", now=None, force=False, fetcher=None: (
+prayer.load = lambda base, url="", now=None, force=False, fetcher=None, **kw: (
     [prayer.Prayer("Fajr", soon)], "Test Masjid · updated just now")
 masjids.search = lambda text="", *a, **k: ([{
     "name": "Test Masjid", "city": "Waterloo, Ontario", "slug": "test-masjid",
@@ -128,7 +128,7 @@ try:
     kept = app.s["prayer_ics_url"]
 
     print("a masjid that cannot be read")
-    prayer.load = lambda base, url="", now=None, force=False, fetcher=None: (
+    prayer.load = lambda base, url="", now=None, force=False, fetcher=None, **kw: (
         [], "Could not read the prayer times: that site does not publish a timetable.")
     win = open_picker()
     search_and_pick(win)
@@ -139,6 +139,53 @@ try:
     check("and the dialog stays open", win.winfo_exists())
     check("and the address that works is exactly as it was",
           app.s.get("prayer_ics_url") == kept, repr(app.s.get("prayer_ics_url")))
+    PROPOSAL = {
+        "kind": "read", "address": "http://erin.example", "name": "Erin Centre", "how": "guessed",
+        "source": "scrape", "status": "read", "asked": "", "km": None, "latitude": 43.77, "longitude": -80.06,
+        "times": [("Fajr", "05:30"), ("Dhuhr", "14:00"), ("Asr", "18:00"), ("Maghrib", "19:22"),
+                  ("Isha", "20:00")]}
+
+    print("a reading taken off a web page is shown before it is kept")
+    masjids.propose = lambda entry, rows, progress=None, **k: dict(PROPOSAL)
+    win = open_picker()
+    search_and_pick(win)
+    shown = lambda: any("Read from Erin Centre" in t for t in labels(win))   # noqa: E731
+    check("the five times read are shown",
+          act(lambda: find(win, w.Button, "Use this masjid").command(), 10, shown),
+          "; ".join(labels(win))[-200:])
+    check("and nothing is saved yet", app.s.get("prayer_ics_url") == kept, repr(app.s.get("prayer_ics_url")))
+    check("and the dialog stays open", win.winfo_exists())
+    check("a second press keeps them",
+          act(lambda: find(win, w.Button, "Use this masjid").command(), 10, lambda: not win.winfo_exists()))
+    check("the address is saved", app.s.get("prayer_ics_url") == "http://erin.example", repr(app.s.get("prayer_ics_url")))
+    check("with where the masjid is, and its name",
+          app.s.get("prayer_lat") == 43.77 and app.s.get("prayer_lon") == -80.06
+          and app.s.get("prayer_masjid_name") == "Erin Centre")
+    check("and these are its own times", app.s.get("prayer_proxy_for") == "")
+
+    print("a neighbour's times are labelled as one's and kept only on a second press")
+    PROXY = dict(PROPOSAL, kind="proxy", name="Nearer Masjid", asked="Erin Centre", km=1.1,
+                 address="http://nearer.example", latitude=43.78)
+    masjids.propose = lambda entry, rows, progress=None, **k: dict(PROXY)
+    win = open_picker()
+    search_and_pick(win)
+    said = lambda: any("Nearer Masjid's times, not Erin Centre's" in t for t in labels(win))   # noqa: E731
+    check("the neighbour is named, and the masjid it stands in for",
+          act(lambda: find(win, w.Button, "Use this masjid").command(), 10, said),
+          "; ".join(labels(win))[-200:])
+    check("and nothing is saved yet", app.s.get("prayer_ics_url") == "http://erin.example")
+    check("a second press keeps them",
+          act(lambda: find(win, w.Button, "Use this masjid").command(), 10, lambda: not win.winfo_exists()))
+    check("and the settings say whose they really are",
+          app.s.get("prayer_ics_url") == "http://nearer.example" and app.s.get("prayer_proxy_for") == "Erin Centre"
+          and app.s.get("prayer_masjid_name") == "Nearer Masjid")
+
+    print("an address typed by hand is not a place the picker knew")
+    app.prayer_url_field.set("http://elsewhere.example")
+    act(lambda: app._set_prayer_url(), 5, lambda: True)
+    check("forgets where the masjid was, and that it was borrowed",
+          app.s.get("prayer_lat") is None and app.s.get("prayer_proxy_for") == ""
+          and app.s.get("prayer_masjid_name") == "", repr(app.s.get("prayer_proxy_for")))
 except Exception:
     import traceback
 
