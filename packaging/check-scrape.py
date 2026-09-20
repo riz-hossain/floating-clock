@@ -203,12 +203,17 @@ def start_times(line: str) -> str:
                 "<div>Maghrib</div><div>7:18 PM</div><div>Isha</div><div>8:41 PM</div>" % line)
 
 
-check("a list of start times under 'For Current Iqama Times Select ...' is the city's prayer times",
-      read(start_times("For Current Iqama Times Select"), TODAY, VANCOUVER) is None)
-check("and so is one under 'Click here for the iqama times'",
-      read(start_times("Click here for the iqama times"), TODAY, VANCOUVER) is None)
-check("but the same list under an actual heading is what it says it is",
-      times(read(start_times("Iqama"), TODAY, VANCOUVER)) == "05:09 13:15 17:17 19:18 20:41")
+POINTERS = ("For Current Iqama Times Select", "Select your branch for iqama times",
+            "Choose a branch for iqama times", "Click here for the iqama times", "Tap for iqama times",
+            "Press for iqama times", "Download the iqama times", "Subscribe for iqama times",
+            "Confirm the iqama times", "Visit us for iqama times", "Contact the masjid for iqama",
+            "For current iqama times see below", "For the latest iqamah times", "For updated iqama times")
+for pointer in POINTERS:
+    check("a list of start times under %r is the city's prayer times, not an iqama column" % pointer,
+          read(start_times(pointer), TODAY, VANCOUVER) is None)
+for heading in ("Iqama", "Iqamah Times", "Iqama Times for Current Week", "Jamaat (Iqama) Timings"):
+    check("but the same list under the heading %r is what it says it is" % heading,
+          times(read(start_times(heading), TODAY, VANCOUVER)) == "05:09 13:15 17:17 19:18 20:41")
 
 # Times a masjid could keep on a September day -- so it is the round adhan times, and
 # nothing about the season, that says this is a template still waiting for its numbers.

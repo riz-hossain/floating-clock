@@ -303,8 +303,8 @@ _HEADING_CHARS = 40  # a line longer than this is prose, not a column heading
 # it as the "iqama column" read start times as iqamas (one Vancouver association's home page, in a
 # check of the reader's own confident readings).
 _POINTER = re.compile(
-    r"\b(?:select|choose|click|tap|press|download|subscribe|confirm|visit|contact"
-    r"|for\s+(?:the\s+)?(?:current|latest|updated))\b", re.I)
+    r"\b(?:select|choose|click|tap|press|download|subscribe|confirm|visit|contact)\b"
+    r"|\bfor\s+(?:the\s+)?(?:current|latest|updated)\s+iqam", re.I)
 
 
 def _chains(tokens) -> list[list[int]]:
