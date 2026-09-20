@@ -187,6 +187,52 @@ check("an announcement's date on the page is not the timetable's",
 check("'September 2026' is a month, not the 20th", times(read(page("<h3>Prayer Times September 2026</h3>" + board))) == GOOD)
 
 # --- pages that must not be read --------------------------------------------------------
+# What Athan+/Masjidal serves, and the most common platform on Canadian masjid sites: today's
+# times under a week of tabs, each tab a line with its Hijri date beneath. Today's own tab sits
+# a dozen lines above the table, well past where a heading normally is.
+WEEK = [("Sunday, Sep 20, 2026", "Rabi Al-Thani 9, 1448"),
+        ("Monday, Sep 21, 2026", "Rabi Al-Thani 10, 1448"),
+        ("Tuesday, Sep 22, 2026", "Rabi Al-Thani 11, 1448"),
+        ("Wednesday, Sep 23, 2026", "Rabi Al-Thani 12, 1448"),
+        ("Thursday, Sep 24, 2026", "Rabi Al-Thani 13, 1448"),
+        ("Friday, Sep 25, 2026", "Rabi Al-Thani 14, 1448"),
+        ("Saturday, Sep 26, 2026", "Rabi Al-Thani 15, 1448")]
+AUGUST = [("Wednesday, Aug 19, 2026", "Safar 6, 1448"),
+          ("Thursday, Aug 20, 2026", "Safar 7, 1448"),
+          ("Friday, Aug 21, 2026", "Safar 8, 1448")]
+
+
+def tabs(days) -> str:
+    return "".join("<div>%s</div><div>%s</div>" % d for d in days) + "<div>Previous Next</div>"
+
+
+def widget(days, before: str = "") -> str:
+    return page(
+        "<h3>PRAYER TIMINGS</h3>" + before + tabs(days) +
+        "<table><tr><td>First Name</td><td>STARTS</td><td>IQAMAH</td></tr>"
+        "<tr><td>Fajr</td><td>5:42 AM</td><td>6:15 AM</td></tr>"
+        "<tr><td>Sunrise</td><td>7:02 AM</td></tr>"
+        "<tr><td>Dhuhr</td><td>1:11 PM</td><td>1:45 PM</td></tr>"
+        "<tr><td>Asr</td><td>5:29 PM</td><td>5:45 PM</td></tr>"
+        "<tr><td>Maghrib</td><td>7:24 PM</td><td>7:28 PM</td></tr>"
+        "<tr><td>Isha</td><td>8:37 PM</td><td>9:00 PM</td></tr></table>"
+        "<div>Jumuah</div><div>1:30 PM</div><div>Jumuah 1</div>")
+
+
+check("a widget's week of day tabs still reads as today's times",
+      times(read(widget(WEEK))) == GOOD)
+check("and so does a short strip of them",
+      times(read(widget(WEEK[:2]))) == GOOD)
+check("a widget left showing another month is refused",
+      read(widget([("Sunday, Aug 16, 2026", "Safar 3, 1448")] + AUGUST)) is None)
+for what, barrier in (("a line with a time in it", "<div>Office hours 9:00 AM</div>"),
+                      ("a line naming a prayer", "<div>Fajr</div>"),
+                      ("a run of lines with no date", "<div>Home</div><div>About</div><div>Donate</div><div>Contact</div>"),
+                      ("a long line of prose",
+                       "<p>Our annual fundraising dinner is on the last Saturday of the month and all are welcome.</p>")):
+    check("the search for a heading stops at %s" % what,
+          read(widget(AUGUST, before="<div>Sunday, Sep 20, 2026</div>" + barrier)) is None)
+
 print("pages that must not be read")
 
 # One Vancouver association's home page: the iqama times need a branch chosen, and what is
