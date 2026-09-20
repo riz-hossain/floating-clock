@@ -521,6 +521,11 @@ _LINK_MAWAQIT = re.compile(
     r"mawaqit\.net/(?:[a-z]{2}/)?(?:[mw]/)?([a-z0-9][a-z0-9-]{5,})", re.I)
 _LINK_PRAYERSCONNECT = re.compile(
     r"prayersconnect\.com/mosques/([a-z0-9][a-z0-9-]{5,})", re.I)
+# Masjidbox draws its timetable with a script, so its page is read the way any
+# script-drawn page is -- in a browser -- but which page is the masjid's own is
+# known from the address, which is what makes it safe to follow.
+_LINK_MASJIDBOX = re.compile(
+    r"masjidbox\.com/prayer-times/([a-z0-9][a-z0-9_-]{2,})", re.I)
 
 
 def _embedded_page(home: str) -> str:
@@ -542,6 +547,8 @@ def _embedded_page(home: str) -> str:
         found[mawaqit.page_url(match.group(1).lower())] = True
     for match in _LINK_PRAYERSCONNECT.finditer(html):
         found["https://prayersconnect.com/mosques/" + match.group(1).lower()] = True
+    for match in _LINK_MASJIDBOX.finditer(html):
+        found["https://masjidbox.com/prayer-times/" + match.group(1).lower()] = True
     return next(iter(found)) if len(found) == 1 else ""
 
 
@@ -571,41 +578,63 @@ def _fetcher_for(url: str, where=None):
 
     def fetch_site(address: str) -> str:
         # A vanity domain can redirect into a platform we read directly, so
-        # settle where it really lives before deciding how to read it.
-        home = dpt.resolve(address)
+        # settle where it really lives before deciding how to read it. A site
+        # that cannot be reached at all stops here, in seconds.
+        home = dpt.resolve(address, strict=True)
         if mawaqit.looks_like(home):
             return mawaqit.fetch(home)
         if prayersconnect.looks_like(home):
             return prayersconnect.fetch(home)
+        # The site's own timetable plugin, when it has one. One that is there
+        # but not usable -- it stops at last year, its congregation times were
+        # never entered -- does not end the search: the page may say more than
+        # the plugin does. It is the message to give if nothing else works,
+        # since it says what the masjid needs to fix.
+        broken = None
         try:
             return dpt.fetch(home, resolved=True)
-        except dpt.NoApi as no_api:
-            # No plugin API, but the site may embed a page on a platform we do
-            # read. Many masjids do exactly that with a mawaqit widget.
-            linked = _embedded_page(home)
-            if linked:
-                try:
-                    reader = mawaqit if mawaqit.looks_like(linked) else prayersconnect
-                    return reader.fetch(linked)
-                except Exception:
-                    log.info("Prayer times: the page embedded at %s did not read", linked)
-            # No timetable API there at all, so it may still be a calendar.
-            # A site that has one but nothing usable in it keeps its own
-            # message, which says more than a calendar parser's would.
+        except dpt.NoApi:
+            pass
+        except dpt.DptError as exc:
+            broken = exc
+        # The site may embed a page on a platform we do read. Many masjids do
+        # exactly that with a mawaqit widget.
+        linked = _embedded_page(home)
+        if linked:
             try:
-                return ics.fetch(address)
+                if mawaqit.looks_like(linked):
+                    return mawaqit.fetch(linked)
+                if prayersconnect.looks_like(linked):
+                    return prayersconnect.fetch(linked)
+                return scrape.fetch(linked, where=where, render=_renderer())
             except Exception:
-                pass
-            # Not a calendar either. Read what the page says.
-            try:
-                return scrape.fetch(home, where=where, render=_renderer())
-            except scrape.ScrapeError as scraped:
-                # "that address did not return a calendar" is true but unhelpful
-                # for someone who pasted a mosque's website; say what was
-                # tried and what to do next.
-                raise dpt.NoApi(
-                    "%s. Its mawaqit.net page, or an iqamah calendar address "
-                    "from the masjid, would work" % scraped) from None
+                log.info("Prayer times: the page embedded at %s did not read", linked)
+        # It may still be a calendar -- but one with prayers in it: a site's
+        # events feed is a calendar too, and says nothing about iqama.
+        try:
+            text = ics.fetch(address)
+            now = datetime.now()
+            if parse_ics(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS)):
+                return text
+        except Exception:
+            pass
+        # Not a calendar either. Read what the page says.
+        try:
+            text = scrape.fetch(home, where=where, render=_renderer())
+        except scrape.ScrapeError as scraped:
+            if broken is not None:
+                raise broken from None
+            # "that address did not return a calendar" is true but unhelpful
+            # for someone who pasted a mosque's website; say what was
+            # tried and what to do next.
+            raise dpt.NoApi(
+                "%s. Its mawaqit.net page, or an iqamah calendar address "
+                "from the masjid, would work" % scraped) from None
+        if broken is not None and not scrape.sun_checked(text):
+            # A plugin gone stale is exactly what puts a season-old timetable on
+            # a page, and only the sun can tell that from today's.
+            raise broken
+        return text
 
     return fetch_site
 

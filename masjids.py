@@ -26,6 +26,7 @@ never passed off as the masjid's own.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import json
 import logging
@@ -198,6 +199,32 @@ def _complaint(source: str, exc: Exception) -> str:
     return "%s: %s" % (source, str(exc)[:90] or exc.__class__.__name__)
 
 
+def _concurrently(jobs: dict, timeout: float = 25.0) -> dict:
+    """{name: (value, error)} for jobs that are run at the same time.
+
+    Each source is a different server and each is slow in its own way; asked one
+    after another they add up to a wait nobody would sit through. One that has
+    not answered in `timeout` seconds is given up on -- it is left to finish in
+    the background, and what it finds is kept for the next time.
+    """
+    out: dict = {}
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(jobs)))
+    try:
+        futures = {name: pool.submit(job) for name, job in jobs.items()}
+        concurrent.futures.wait(list(futures.values()), timeout=timeout)
+        for name, future in futures.items():
+            if not future.done():
+                out[name] = (None, TimeoutError("still looking; try again in a minute"))
+                continue
+            try:
+                out[name] = (future.result(), None)
+            except Exception as exc:                 # a search must never crash
+                out[name] = (None, exc)
+    finally:
+        pool.shutdown(wait=False)
+    return out
+
+
 def search(text: str = "", lat=None, lon=None, radius_km: float = 50.0,
            limit: int = 60, online: bool = True) -> tuple[list[dict], str]:
     """(masjids, trouble) for a town, an address, a postal code or a name.
@@ -216,36 +243,40 @@ def search(text: str = "", lat=None, lon=None, radius_km: float = 50.0,
         return _rank(bundled, text, point)[:limit], ""
 
     troubles: list[str] = []
-    mawaqit_rows: list = []
-    osm_rows: list = []
-    around: list = []
 
-    if point is None and text:
-        try:
-            place = osm.geocode(text)
-        except Exception as exc:
-            place = None
-            troubles.append(_complaint("map", exc))
-        if place:
-            point = (place["lat"], place["lon"])
-            around = search_directory("", point[0], point[1], SEARCH_RADIUS_KM, 500)
+    def note(source: str, error) -> None:
+        if error is not None and not any(t.startswith(source + ":") for t in troubles):
+            troubles.append(_complaint(source, error))
 
+    # First, where is it, and who is called that -- at once.
+    first: dict = {}
     if text:
-        try:
-            mawaqit_rows += mawaqit.search(word=text)
-        except Exception as exc:                 # a search must never crash
-            troubles.append(_complaint("mawaqit.net", exc))
+        first["mawaqit-name"] = lambda: mawaqit.search(word=text)
+        if point is None:
+            first["place"] = lambda: osm.geocode(text)
+    got = _concurrently(first)
+    mawaqit_rows = list(got.get("mawaqit-name", (None, None))[0] or [])
+    note("mawaqit.net", got.get("mawaqit-name", (None, None))[1])
+    place, error = got.get("place", (None, None))
+    note("map", error)
+    around: list = []
+    if point is None and place:
+        point = (place["lat"], place["lon"])
+    if point is not None and place:
+        around = search_directory("", point[0], point[1], SEARCH_RADIUS_KM, 500)
+
+    # Then what lies around that point, from the two that can say.
+    osm_rows: list = []
     if point is not None:
-        try:
-            mawaqit_rows += mawaqit.search(lat=point[0], lon=point[1],
-                                           radius_km=int(min(radius_km, SEARCH_RADIUS_KM)))
-        except Exception as exc:
-            if not any(t.startswith("mawaqit.net") for t in troubles):
-                troubles.append(_complaint("mawaqit.net", exc))
-        try:
-            osm_rows = osm.mosques_near(point[0], point[1], min(radius_km, SEARCH_RADIUS_KM))
-        except Exception as exc:
-            troubles.append(_complaint("map", exc))
+        reach = min(radius_km, SEARCH_RADIUS_KM)
+        second = _concurrently({
+            "mawaqit-near": lambda: mawaqit.search(lat=point[0], lon=point[1], radius_km=int(reach)),
+            "map": lambda: osm.mosques_near(point[0], point[1], reach),
+        })
+        mawaqit_rows += list(second["mawaqit-near"][0] or [])
+        note("mawaqit.net", second["mawaqit-near"][1])
+        osm_rows = list(second["map"][0] or [])
+        note("map", second["map"][1])
 
     merged = _merge(mawaqit_rows, bundled, around, osm_rows)
     return _rank(merged, text, point)[:limit], "; ".join(troubles)
@@ -292,6 +323,30 @@ def address_for(entry: dict) -> str:
     """The first address to try, or "" when there is nothing to read from."""
     found = addresses_for(entry)
     return found[0] if found else ""
+
+
+# The sun's own time is longitude / 15 hours from Greenwich, and a time zone never
+# strays from that by more than about two hours -- so a masjid this far off this
+# computer's clock is in another time zone.
+ZONE_SLACK_HOURS = 2.5
+
+
+def zone_problem(entry: dict) -> str:
+    """"" when a masjid is on this computer's time zone, else a sentence saying it is not.
+
+    The clock shows every time on this computer's clock, so a masjid in another
+    zone would have its prayers shown hours from when they are.
+    """
+    spot = where_of(entry)
+    if spot is None:
+        return ""
+    from . import astro
+
+    if abs(astro.local_offset_hours() - spot[1] / 15.0) <= ZONE_SLACK_HOURS:
+        return ""
+    return ("%s looks to be in a different time zone from this computer, and the clock shows every "
+            "time on this computer's clock, so its prayers would appear hours from when they are"
+            % (str(entry.get("name") or "That masjid")))
 
 
 def where_of(entry: dict):
@@ -413,6 +468,10 @@ def propose(entry: dict, rows: list, progress=None, clock=time.time) -> dict:
     say = progress or (lambda _text: None)
     name = str(entry.get("name") or "that masjid")
     spot = where_of(entry)
+    zone = zone_problem(entry)
+    if zone:
+        return {"kind": "none", "address": "", "name": name, "times": [], "status": zone + ".",
+                "how": "", "source": "", "asked": "", "km": None, "latitude": None, "longitude": None}
     reasons: list[str] = []
     for address in addresses_for(entry):
         say("Checking %s…" % name)

@@ -76,11 +76,23 @@ check("the iqama first and the adhan labelled after it",
           ("ASR", "5:45 PM", "05:34 PM"), ("MAGHRIB", "7:28 PM", "07:24 PM"),
           ("ISHA", "9:00 PM", "08:43 PM")))))) == GOOD)
 
-check("a label with the time straight after its colon",
-      times(read(page("".join("<p>%s %s ATHAN:%s</p>" % row for row in (
-          ("FAJR", "6:15 AM", "05:49 AM"), ("DHUHR", "1:45 PM", "01:16 PM"),
-          ("ASR", "5:45 PM", "05:34 PM"), ("MAGHRIB", "7:28 PM", "07:24 PM"),
-          ("ISHA", "9:00 PM", "08:43 PM")))))) == GOOD)
+found = read(page("".join("<p>%s %s ATHAN:%s</p>" % row for row in (
+    ("FAJR", "6:15 AM", "05:49 AM"), ("DHUHR", "1:45 PM", "01:16 PM"),
+    ("ASR", "5:45 PM", "05:34 PM"), ("MAGHRIB", "7:28 PM", "07:24 PM"),
+    ("ISHA", "9:00 PM", "08:43 PM")))))
+check("a label with the time straight after its colon", times(found) == GOOD and found["how"] == "labelled",
+      "%s (%s)" % (times(found), found and found["how"]))
+
+pieces = "".join("<div>%s</div><div>%s</div><div>%s AM</div><div>Iqamah</div><div>%s</div><div>%s AM</div>" % row
+                 for row in (("Fajr", "5", "49", "6", "15"),))
+pieces += "".join("<div>%s</div><div>%s</div><div>%s PM</div><div>Iqamah</div><div>%s</div><div>%s PM</div>" % row
+                  for row in (("Dhuhr", "1", "16", "1", "45"), ("Asr", "5", "34", "5", "45"),
+                              ("Maghrib", "7", "24", "7", "28"), ("Isha", "8", "43", "9", "00")))
+check("a time drawn as two elements, the hour and then the minutes, is one time",
+      times(read(page(pieces))) == GOOD, times(read(page(pieces))))
+check("but a number on its own and a number on the next line are not always a time",
+      scrape.flatten("<div>5</div><div>48 people came</div><div>1</div><div>7</div>") ==
+      ["5", "48 people came", "1", "7"])
 
 across = ("<table><tr><td></td><td>Fajr</td><td>Dhuhr</td><td>Asr</td><td>Maghrib</td><td>Isha</td></tr>"
           "<tr><td>Adhan</td><td>5:49</td><td>1:16</td><td>5:34</td><td>7:24</td><td>8:43</td></tr>"
@@ -177,10 +189,15 @@ check("'September 2026' is a month, not the 20th", times(read(page("<h3>Prayer T
 # --- pages that must not be read --------------------------------------------------------
 print("pages that must not be read")
 
+# Times a masjid could keep on a September day -- so it is the round adhan times, and
+# nothing about the season, that says this is a template still waiting for its numbers.
 template = ("<table><tr><td></td><td>Fajr</td><td>Dhuhr</td><td>Asr</td><td>Maghrib</td><td>Isha</td></tr>"
-            "<tr><td>Adhan</td><td>5:00</td><td>12:30</td><td>4:00</td><td>6:00</td><td>8:00</td></tr>"
-            "<tr><td>Iqama</td><td>5:30</td><td>1:00</td><td>4:30</td><td>6:15</td><td>8:30</td></tr></table>")
+            "<tr><td>Adhan</td><td>5:30</td><td>1:00</td><td>5:00</td><td>7:30</td><td>9:00</td></tr>"
+            "<tr><td>Iqama</td><td>6:00</td><td>1:30</td><td>5:30</td><td>7:35</td><td>9:30</td></tr></table>")
 check("a template of adhan times on the hour and half hour", read(page(template)) is None)
+check("and the same table with real adhan times is a timetable",
+      read(page(template.replace("5:30</td><td>1:00</td><td>5:00</td><td>7:30</td><td>9:00",
+                                 "5:49</td><td>1:16</td><td>5:14</td><td>7:24</td><td>8:43"))) is not None)
 
 june = page("".join("<p>%s Athan %s Iqama %s</p>" % row for row in (
     ("Fajr", "3:35 AM", "4:00 AM"), ("Dhuhr", "1:16 PM", "1:45 PM"), ("Asr", "5:34 PM", "6:15 PM"),

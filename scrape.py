@@ -166,6 +166,30 @@ class _Flat(HTMLParser):
         self._flush()
 
 
+_HOUR_ALONE = re.compile(r"^\d{1,2}$")
+_MINUTES_ALONE = re.compile(r"^(\d{2})(?:\s*[ap]\.?\s?m\.?)?$", re.I)
+
+
+def _join_split_times(lines: list[str]) -> list[str]:
+    """"5" then "48 AM" on two lines is 5:48 AM.
+
+    Some widgets draw the hour and the minutes as separate elements, which a
+    person sees as one time and a reader of the text sees as two numbers.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if i + 1 < len(lines) and _HOUR_ALONE.match(lines[i]) and int(lines[i]) <= 24:
+            rest = _MINUTES_ALONE.match(lines[i + 1])
+            if rest and int(rest.group(1)) <= 59:
+                out.append("%s:%s" % (lines[i], lines[i + 1]))
+                i += 2
+                continue
+        out.append(lines[i])
+        i += 1
+    return out
+
+
 def flatten(html: str) -> list[str]:
     parser = _Flat()
     try:
@@ -173,7 +197,7 @@ def flatten(html: str) -> list[str]:
         parser.close()
     except Exception:
         log.debug("could not fully parse a page", exc_info=True)
-    return parser.lines
+    return _join_split_times(parser.lines)
 
 
 def page_title(html: str) -> str:
@@ -1153,6 +1177,14 @@ def source_name(text: str) -> str:
     except ValueError:
         return ""
     return "%s (read from its web page)" % (data.get("name") or "")
+
+
+def sun_checked(text: str) -> bool:
+    """Whether the reading in a cache was checked against the sun."""
+    try:
+        return bool(json.loads(text).get("sun_checked"))
+    except ValueError:
+        return False
 
 
 def how(text: str) -> str:

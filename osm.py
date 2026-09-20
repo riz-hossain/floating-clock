@@ -24,6 +24,7 @@ Map data (c) OpenStreetMap contributors, under the Open Database Licence.
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import json
 import logging
@@ -48,7 +49,9 @@ OVERPASS = (
     "https://overpass.private.coffee/api/interpreter",
 )
 
-TIMEOUT = 25.0
+TIMEOUT = 20.0
+# How long a search waits for the map before going on without it.
+BUDGET = 18.0
 CACHE_DAYS = 30
 CACHE_NAME = "osm-cache.json"
 
@@ -97,10 +100,15 @@ def _cached(key: str):
     return None
 
 
+_cache_lock = threading.Lock()
+
+
 def _remember(key: str, value) -> None:
-    data = _load_cache()
-    data[key] = {"at": time.time(), "value": value}
-    _save_cache(data)
+    # Read, add, write back: two answers arriving together must not lose one.
+    with _cache_lock:
+        data = _load_cache()
+        data[key] = {"at": time.time(), "value": value}
+        _save_cache(data)
 
 
 # --- talking to the services -----------------------------------------------------
@@ -190,29 +198,28 @@ def _clean(element: dict) -> dict | None:
     }
 
 
-def mosques_near(lat: float, lon: float, radius_km: float = 20.0, opener=None) -> list[dict]:
+def mosques_near(lat: float, lon: float, radius_km: float = 20.0, opener=None,
+                 budget: float = BUDGET) -> list[dict]:
     """Masjids mapped within `radius_km` of a point. Raises OsmError if none of
-    the servers answers; an empty list means the area is simply unmapped."""
+    the servers answers in time; an empty list means the area is simply unmapped.
+
+    The servers are volunteers' and any of them can be slow or busy at any moment,
+    so one query goes to each at once and the first good answer is used. A slow
+    one is left to finish in the background: what it finds is kept, so asking
+    again a minute later costs nothing.
+    """
     radius_m = int(max(1.0, min(radius_km, 50.0)) * 1000)
     key = "near:%.2f,%.2f,%d" % (lat, lon, radius_m // 1000)
     hit = _cached(key)
     if hit is not None:
         return hit
     body = urllib.parse.urlencode({"data": _query(lat, lon, radius_m)}).encode()
-    last = "no answer"
-    for server in OVERPASS:
+
+    def ask(server: str):
         _polite()
-        try:
-            elements = _request(server, data=body, opener=opener).get("elements") or []
-        except urllib.error.HTTPError as exc:
-            last = "HTTP %d" % exc.code
-            if exc.code in (429, 502, 503, 504):
-                time.sleep(2.0)               # busy: the next mirror, not a harder push
-                continue
-            raise OsmError("the map service answered %s" % last) from None
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            last = str(exc)[:60]
-            continue
+        return _request(server, data=body, timeout=TIMEOUT, opener=opener).get("elements") or []
+
+    def keep(elements) -> list[dict]:
         seen, out = set(), []
         for element in elements:
             item = _clean(element)
@@ -225,4 +232,30 @@ def mosques_near(lat: float, lon: float, radius_km: float = 20.0, opener=None) -
             out.append(item)
         _remember(key, out)
         return out
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(OVERPASS))
+    pending = {pool.submit(ask, server) for server in OVERPASS}
+    for future in pending:
+        # Even after this call has given up, an answer that arrives is worth keeping.
+        future.add_done_callback(lambda f: f.exception() is None and keep(f.result()))
+    deadline = time.time() + budget
+    last = "no answer"
+    try:
+        while pending and time.time() < deadline:
+            done, pending = concurrent.futures.wait(
+                pending, timeout=max(0.05, deadline - time.time()),
+                return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                try:
+                    elements = future.result()
+                except urllib.error.HTTPError as exc:
+                    last = "HTTP %d" % exc.code
+                    if exc.code not in (429, 502, 503, 504):
+                        raise OsmError("the map service answered %s" % last) from None
+                except (urllib.error.URLError, OSError, ValueError) as exc:
+                    last = str(exc)[:60]
+                else:
+                    return _cached(key) or keep(elements)
+    finally:
+        pool.shutdown(wait=False)
     raise OsmError("the map service is busy (%s); try again in a minute" % last)

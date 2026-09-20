@@ -18,7 +18,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import time
 import urllib.error
 from datetime import datetime, timedelta
@@ -125,8 +124,11 @@ check("a way is placed at its centre", abs(found[1]["latitude"] - 51.06) < 1e-9)
 check("the same masjid mapped twice is listed once", names.count("Masjid One") == 1)
 check("a nameless one cannot be offered", all(m["name"] for m in found))
 check("a prayer room is marked as one", found[2]["type"] == "prayer_room")
+time.sleep(0.2)                                  # let the slower servers' answers land
+asked_first = len(calls)
 osm.mosques_near(51.0447, -114.0719, 20, opener=lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked twice")))
-check("what was found is kept, so the same area is not asked for twice", len(calls) == 1)
+check("what was found is kept, so the same area is not asked for twice", asked_first == len(osm.OVERPASS)
+      and len(calls) == asked_first, "%d then %d" % (asked_first, len(calls)))
 
 busy = {"n": 0}
 
@@ -138,9 +140,9 @@ def one_busy(request, timeout=None):
     return Reply(elements)
 
 
-osm.time.sleep = lambda _s: None                        # not waiting out a real back-off
 got = osm.mosques_near(45.0, -75.0, 20, opener=one_busy)
-check("a busy server is answered by trying the next, not harder", len(got) == 3 and busy["n"] == 2, str(busy))
+check("a busy server does not stop the others answering", len(got) == 3 and busy["n"] >= 2, str(busy))
+check("and each server is asked once, not pressed", busy["n"] == len(osm.OVERPASS), str(busy))
 
 
 def all_busy(request, timeout=None):
@@ -175,6 +177,9 @@ on = dict(MW, iqama=True)
 check("one that publishes times has its MAWAQIT page first, its site after",
       masjids.addresses_for(dict(on, website="http://alnoor.example")) ==
       [mawaqit.page_url("masjid-al-noor-calgary"), "http://alnoor.example"])
+check("two entries on the same spot are one masjid, whatever each calls it",
+      masjids._same_place({"name": "Masjid Al-Noor", "latitude": 51.05, "longitude": -114.07},
+                          {"name": "Prayer Hall", "latitude": 51.0503, "longitude": -114.0702}))
 check("two masjids down one street are two",
       not masjids._same_place({"name": "Masjid Bilal", "latitude": 51.05, "longitude": -114.07},
                               {"name": "Dar ul Hikmah", "latitude": 51.0536, "longitude": -114.07}))
@@ -248,6 +253,10 @@ def fake_inspect(address, where=None):
 
 real_inspect = masjids.inspect
 masjids.inspect = fake_inspect
+from floating_clock import astro  # noqa: E402
+
+real_local_offset = astro.local_offset_hours
+astro.local_offset_hours = lambda when=None: -4.0               # Eastern Daylight Time, whatever runs this
 
 target = {"name": "Erin Centre", "latitude": 43.77, "longitude": -80.06, "website": "http://erin.example"}
 near = {"name": "Near Masjid", "latitude": 43.80, "longitude": -80.06, "website": "http://near.example"}
@@ -299,6 +308,14 @@ clock = iter([0.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0])
 got = masjids.propose(target, rows, clock=lambda: next(clock))
 check("the search for a neighbour gives up when its time is used", got["kind"] == "none", got["kind"])
 
+check("a masjid in another time zone is not offered, and it says why",
+      masjids.propose({"name": "Calgary Centre", "latitude": 51.05, "longitude": -114.07,
+                       "website": "http://calgary.example"}, rows)["kind"] == "none"
+      and "different time zone" in masjids.propose({"name": "Calgary Centre", "latitude": 51.05,
+                                                    "longitude": -114.07}, rows)["status"])
+check("nor is anything even tried for it", "http://calgary.example" not in tried)
+check("a masjid whose position is not known is not accused of it", masjids.zone_problem({"name": "x"}) == "")
+astro.local_offset_hours = real_local_offset
 masjids.inspect = real_inspect
 
 text = masjids.confirmation({"kind": "read", "name": "Erin Centre", "times": [("Fajr", "05:30"), ("Isha", "20:00")]})
@@ -316,8 +333,8 @@ masjids.apply(settings, {"kind": "proxy", "address": "http://nearer.example", "n
                          "asked": "Erin Centre", "latitude": 43.78, "longitude": -80.06})
 check("an accepted choice is written into the settings", settings["prayer_ics_url"] == "http://nearer.example"
       and settings["prayer_lat"] == 43.78 and settings["prayer_proxy_for"] == "Erin Centre")
-masjids.apply(settings, {"kind": "exact", "address": "http://erin.example", "name": "Erin Centre", "asked": "",
-                         "latitude": 43.77, "longitude": -80.06})
+masjids.apply(settings, {"kind": "read", "address": "http://erin.example", "name": "Erin Centre",
+                         "asked": "left over", "latitude": 43.77, "longitude": -80.06})
 check("and choosing a masjid's own times ends the borrowing", settings["prayer_proxy_for"] == "")
 masjids.forget_place(settings)
 check("an address changed by hand forgets which masjid it was", settings["prayer_lat"] is None
@@ -376,7 +393,111 @@ scrape.fetch = fails
 loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
 check("a site that cannot be read says why, and what would work",
       not loaded and "image" in status and "mawaqit.net" in status, status)
+
+
+def stale_plugin(home, **k):
+    raise dpt.DptError("that masjid's timetable stops at 2024-12-31; it needs updating on their website")
+
+
+def read_page(sun_checked):
+    def fetch(home, **k):
+        seen["scraped"] = seen.get("scraped", 0) + 1
+        return json.dumps({"source": "scrape", "name": "Erin Centre", "asof": datetime.now().strftime("%Y-%m-%d"),
+                           "how": "labelled", "sun_checked": sun_checked,
+                           "iqamah": {"Fajr": "06:15", "Dhuhr": "13:45", "Asr": "17:45", "Maghrib": "19:28",
+                                      "Isha": "21:00"}})
+    return fetch
+
+
+print("a plugin that is there but not usable")
+dpt.fetch, prayer._embedded_page, ics.fetch = stale_plugin, (lambda home: ""), no_calendar
+seen.clear()
+scrape.fetch = read_page(True)
+loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
+check("does not end the search: the page may say more than the plugin", loaded and seen.get("scraped") == 1, status)
+
+scrape.fetch = read_page(False)
+loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
+check("but a page nothing could check against the sun is not trusted over a stale plugin",
+      not loaded and "stops at 2024-12-31" in status, status)
+
+scrape.fetch = fails
+loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
+check("and if nothing else works, the message is the plugin's, which says what to fix",
+      not loaded and "stops at 2024-12-31" in status and "mawaqit.net" not in status, status)
+
+prayer._embedded_page = lambda home: "https://mawaqit.net/en/erin-centre-erin"
+real_mawaqit_fetch = mawaqit.fetch
+mawaqit.fetch = lambda page, **k: scraped("x")
+loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
+check("a mawaqit widget on the page is used when the plugin is not", bool(loaded), status)
+mawaqit.fetch = real_mawaqit_fetch
+prayer._embedded_page = lambda home: ""
+
+print("a calendar with no prayers in it")
+tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y%m%dT120000Z")
+CRLF = chr(13) + chr(10)
+EVENTS_ONLY = CRLF.join(["BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT", "UID:1", "SUMMARY:Bake sale",
+                         "DTSTART:" + tomorrow, "DTEND:" + tomorrow, "END:VEVENT", "END:VCALENDAR", ""])
+ics.fetch = lambda address, **k: EVENTS_ONLY
+dpt.fetch = no_api
+seen.clear()
+scrape.fetch = scraped
+loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
+check("an events calendar is not the timetable: the page is read instead", loaded and seen.get("home"), status)
+
+print("a site that cannot be reached")
+
+
+def unreachable(address, **k):
+    raise dpt.DptError("could not reach the site (Name or service not known)")
+
+
+dpt.resolve = unreachable
+seen.clear()
+scrape.fetch = scraped
+loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://gone.example", force=True)
+check("is an error at once", not loaded and "could not reach the site" in status, status)
+check("and nothing further is tried", not seen)
 dpt.resolve, dpt.fetch, prayer._embedded_page, ics.fetch, scrape.fetch, prayer._renderer = real_parts
+
+print("probing a site")
+
+
+class Answer:
+    def __init__(self, url):
+        self._url = url
+
+    def geturl(self):
+        return self._url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+final, problem = dpt.probe("http://vanity.example", opener=lambda req, timeout=None: Answer("https://platform.example/x/"))
+check("a site that answers says where it really lives", (final, problem) == ("https://platform.example/x/", ""), str((final, problem)))
+final, problem = dpt.probe("http://vanity.example", opener=lambda req, timeout=None: (_ for _ in ()).throw(
+    urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)))
+check("one that refuses us has still answered", problem == "" and final == "http://vanity.example", str((final, problem)))
+final, problem = dpt.probe("http://gone.example", opener=lambda req, timeout=None: (_ for _ in ()).throw(
+    urllib.error.URLError("[Errno 11001] getaddrinfo failed")))
+check("one that cannot be reached says why", "getaddrinfo" in problem, problem)
+started = time.time()
+final, problem = dpt.probe("http://slow.example", timeout=0.3, opener=lambda req, timeout=None: time.sleep(6))
+check("one that does not answer is not waited for", problem == "no answer" and time.time() - started < 5.0,
+      "%s after %.1fs" % (problem, time.time() - started))
+try:
+    dpt.resolve("http://gone.example", strict=True, opener=lambda req, timeout=None: (_ for _ in ()).throw(
+        urllib.error.URLError("no route")))
+    check("resolve can insist that a site answers", False, "no error raised")
+except dpt.DptError as exc:
+    check("resolve can insist that a site answers", "could not reach" in str(exc), str(exc))
+check("and by default it does not", dpt.resolve("http://gone.example", opener=lambda req, timeout=None: (_ for _ in ()).throw(
+    urllib.error.URLError("no route"))) == "http://gone.example")
 
 # --- the loader -----------------------------------------------------------------------------------------------------
 print("the loader")
