@@ -189,6 +189,27 @@ check("'September 2026' is a month, not the 20th", times(read(page("<h3>Prayer T
 # --- pages that must not be read --------------------------------------------------------
 print("pages that must not be read")
 
+# One Vancouver association's home page: the iqama times need a branch chosen, and what is
+# printed is the city's start times (Fajr 5:09 is first light). Counting the instruction as a
+# heading read them as iqamas.
+VANCOUVER = (49.28, -123.12, -7)
+
+
+def start_times(line: str) -> str:
+    return page("<h3>Salah Times</h3><div>Show Prayer Times for:</div><div>%s</div>"
+                "<div>Your Local Branch e.g. Richmond</div>"
+                "<div>Fajr</div><div>5:09 AM</div><div>Sunrise</div><div>6:55 AM</div>"
+                "<div>Zuhr</div><div>1:15 PM</div><div>Asr</div><div>5:17 PM</div>"
+                "<div>Maghrib</div><div>7:18 PM</div><div>Isha</div><div>8:41 PM</div>" % line)
+
+
+check("a list of start times under 'For Current Iqama Times Select ...' is the city's prayer times",
+      read(start_times("For Current Iqama Times Select"), TODAY, VANCOUVER) is None)
+check("and so is one under 'Click here for the iqama times'",
+      read(start_times("Click here for the iqama times"), TODAY, VANCOUVER) is None)
+check("but the same list under an actual heading is what it says it is",
+      times(read(start_times("Iqama"), TODAY, VANCOUVER)) == "05:09 13:15 17:17 19:18 20:41")
+
 # Times a masjid could keep on a September day -- so it is the round adhan times, and
 # nothing about the season, that says this is a template still waiting for its numbers.
 template = ("<table><tr><td></td><td>Fajr</td><td>Dhuhr</td><td>Asr</td><td>Maghrib</td><td>Isha</td></tr>"
