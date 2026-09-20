@@ -469,6 +469,22 @@ def _proposal(entry: dict, address: str, got: dict, kind: str) -> dict:
     }
 
 
+def _minutes_of(hhmm: str) -> int:
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def differing(first: list, second: list, tolerance: int = 10) -> list:
+    """The prayers on which two readings of one day disagree by more than `tolerance` minutes.
+
+    Only the five daily prayers, by name, and only where both readings have
+    them: on a Friday one may call the midday prayer Jumu'ah, and a masjid's
+    khutbah time is not its Dhuhr iqama, so they are simply not compared.
+    """
+    a, b = dict(first), dict(second)
+    return [name for name in ("Fajr", "Dhuhr", "Asr", "Maghrib", "Isha")
+            if name in a and name in b and abs(_minutes_of(a[name]) - _minutes_of(b[name])) > tolerance]
+
+
 def propose(entry: dict, rows: list, progress=None, clock=time.time) -> dict:
     """What to offer for this choice. Slow: run it on a worker.
 
@@ -493,11 +509,15 @@ def propose(entry: dict, rows: list, progress=None, clock=time.time) -> dict:
         return {"kind": "none", "address": "", "name": name, "times": [], "status": zone + ".",
                 "how": "", "source": "", "asked": "", "km": None, "latitude": None, "longitude": None}
     reasons: list[str] = []
-    for address in addresses_for(entry):
+    addresses = addresses_for(entry)
+    for address in addresses:
         say("Checking %s…" % name)
         got = inspect(address, spot)
         if got["prayers"]:
-            return _proposal(entry, address, got, "exact" if got["exact"] else "read")
+            found = _proposal(entry, address, got, "exact" if got["exact"] else "read")
+            if got["source"] == "mawaqit":
+                _cross_check(found, entry, [a for a in addresses if a != address], spot, say)
+            return found
         reasons.append(got["status"].replace("Could not read the prayer times: ", ""))
 
     started = clock()
@@ -522,6 +542,32 @@ def propose(entry: dict, rows: list, progress=None, clock=time.time) -> dict:
             "how": "", "source": "", "asked": "", "km": None, "latitude": None, "longitude": None}
 
 
+def _cross_check(found: dict, entry: dict, others: list, spot, say) -> None:
+    """Compare a mawaqit.net listing with what the masjid's own website says.
+
+    They are two people's records of one thing, and they part company more than
+    one would hope: a listing set up last winter, or with its iqama offsets never
+    entered, is exact about what it holds and wrong about today. Where they
+    disagree and the page reads with some certainty, it is the masjid speaking
+    for itself and it is what is offered; the listing is named as the dissenter.
+    """
+    for address in others:
+        say("Comparing with %s's own website…" % (entry.get("name") or "the masjid"))
+        page = inspect(address, spot)
+        if not page["prayers"] or page["source"] != "scrape":
+            continue
+        apart = differing(found["times"], page["times"])
+        if not apart:
+            return
+        if page["how"] in ("labelled", "headed"):
+            listing = found["times"]
+            found.update(_proposal(entry, address, page, "read"))
+            found["disagrees"] = {"who": "mawaqit.net", "times": listing, "prayers": apart}
+        else:
+            found["disagrees"] = {"who": "the masjid's own website", "times": page["times"], "prayers": apart}
+        return
+
+
 def clock_text(times: list, use_24h: bool = False) -> str:
     """"Fajr 6:15 AM · Dhuhr 1:45 PM · ..." for a proposal's times."""
     parts = []
@@ -544,6 +590,14 @@ def confirmation(proposal: dict, use_24h: bool = False) -> str:
     times = clock_text(proposal.get("times") or [], use_24h)
     name = proposal.get("name") or "that masjid"
     note = (" Note: %s." % proposal["warning"]) if proposal.get("warning") else ""
+    if proposal.get("disagrees"):
+        other = proposal["disagrees"]
+        if proposal.get("kind") == "read":
+            note += (" %s lists different times (%s), and the masjid's own page is the more likely to be "
+                     "current." % (other["who"][0].upper() + other["who"][1:], clock_text(other["times"], use_24h)))
+        else:
+            note += (" Note that %s reads differently for %s (%s)." % (
+                other["who"], ", ".join(other["prayers"]), clock_text(other["times"], use_24h)))
     if proposal.get("kind") == "exact":
         source = {"mawaqit": "mawaqit.net", "prayersconnect": "PrayersConnect"}.get(
             proposal.get("source"), "its published timetable")

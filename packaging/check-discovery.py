@@ -308,6 +308,55 @@ clock = iter([0.0, 500.0, 500.0, 500.0, 500.0, 500.0, 500.0])
 got = masjids.propose(target, rows, clock=lambda: next(clock))
 check("the search for a neighbour gives up when its time is used", got["kind"] == "none", got["kind"])
 
+print("a listing and the masjid's own page")
+
+
+def said(source, how, hhmm):
+    """A reading whose five times are given, as one source or another."""
+    day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    ps = [prayer.Prayer(n, day + timedelta(hours=int(t[:2]), minutes=int(t[3:]))) for n, t in zip(prayer.DAILY, hhmm)]
+    return {"prayers": ps, "status": "ok", "source": source, "how": how, "exact": source != "scrape",
+            "times": masjids._day_times(ps)}
+
+
+LISTING = ("06:45", "14:30", "16:32", "19:06", "20:36")          # what mawaqit.net held for Ottawa South
+PAGE = ("05:30", "13:30", "17:30", "19:12", "20:45")             # what the masjid's own page said
+both = {"name": "Both Masjid", "slug": "both-masjid-x", "iqama": True, "website": "http://both.example",
+        "latitude": 43.77, "longitude": -80.06}
+listing_address = mawaqit.page_url("both-masjid-x")
+
+outcomes = {listing_address: said("mawaqit", "", LISTING), "http://both.example": said("scrape", "labelled", LISTING)}
+got = masjids.propose(both, [both])
+check("a listing and a page that agree change nothing", got["kind"] == "exact" and "disagrees" not in got, str(got.get("kind")))
+
+outcomes = {listing_address: said("mawaqit", "", LISTING), "http://both.example": said("scrape", "labelled", PAGE)}
+got = masjids.propose(both, [both])
+check("where they differ and the page reads with certainty, the page is what is offered",
+      got["kind"] == "read" and got["address"] == "http://both.example", "%s %s" % (got["kind"], got["address"]))
+check("and the listing is named as the dissenter", got.get("disagrees", {}).get("who") == "mawaqit.net"
+      and "Fajr" in got["disagrees"]["prayers"], str(got.get("disagrees")))
+text = masjids.confirmation(got)
+check("in words a person can act on", "Mawaqit.net lists different times" in text and "Fajr 6:45 AM" in text
+      and "Fajr 5:30 AM" in text, text)
+
+outcomes = {listing_address: said("mawaqit", "", LISTING), "http://both.example": said("scrape", "guessed", PAGE)}
+got = masjids.propose(both, [both])
+check("a page that was only guessed at does not displace the listing", got["kind"] == "exact"
+      and got["address"] == listing_address, "%s %s" % (got["kind"], got["address"]))
+check("but is mentioned, since the two disagree", got.get("disagrees", {}).get("who") == "the masjid's own website"
+      and "reads differently" in masjids.confirmation(got), masjids.confirmation(got))
+
+outcomes = {listing_address: said("mawaqit", "", LISTING)}
+got = masjids.propose(both, [both])
+check("a page that cannot be read leaves the listing alone", got["kind"] == "exact" and "disagrees" not in got)
+
+check("a few minutes' difference is not a disagreement",
+      masjids.differing([("Fajr", "05:30"), ("Isha", "20:45")], [("Fajr", "05:38"), ("Isha", "20:41")]) == [])
+check("ten and more is", masjids.differing([("Fajr", "05:30")], [("Fajr", "05:45")]) == ["Fajr"])
+check("a Friday's Jumu'ah is not compared with Dhuhr",
+      masjids.differing([("Jumuah", "13:15"), ("Asr", "17:30")], [("Dhuhr", "13:45"), ("Asr", "17:30")]) == [])
+outcomes = {}
+
 check("a masjid in another time zone is not offered, and it says why",
       masjids.propose({"name": "Calgary Centre", "latitude": 51.05, "longitude": -114.07,
                        "website": "http://calgary.example"}, rows)["kind"] == "none"
