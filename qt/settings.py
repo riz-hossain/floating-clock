@@ -19,10 +19,11 @@ import json
 from .. import (
     alerts, caldav, cast as cast_mod, google_oauth, ics, orgs as orgs_mod,
     masjids as masjids_mod, palette as pal, prayer as prayer_mod, providers, render,
-    routines as routines_mod, settings as cfg, themes, vault,
+    routines as routines_mod, settings as cfg, themes, timeline, vault,
 )
 from ..timetext import parse_clock_time
 from . import ui
+from .timelinewidget import TimelineWidget
 
 PAGES = (("clock", "Clock"), ("behaviour", "Behaviour"), ("meetings", "Meetings"),
          ("calendars", "Calendars"), ("prayer", "Prayer"), ("alarms", "Alarms"),
@@ -861,7 +862,14 @@ class MasjidPicker(QtWidgets.QDialog):
 
         self.listing = QtWidgets.QListWidget()
         self.listing.itemDoubleClicked.connect(lambda _item: self.use())
-        body.addWidget(self.listing, 1)
+        # Choosing a masjid takes a while, and a line of small print is no way to sit through
+        # it: while it works the list gives way to a timeline of what is being tried.
+        self.checking = TimelineWidget(owner.p)
+        self.pages = QtWidgets.QStackedWidget()
+        self.pages.addWidget(self.listing)
+        self.pages.addWidget(self.checking)
+        body.addWidget(self.pages, 1)
+        self.trail: timeline.Timeline | None = None
 
         self.status = QtWidgets.QLabel(
             "Type a town or a masjid's name, then press Search.")
@@ -870,21 +878,53 @@ class MasjidPicker(QtWidgets.QDialog):
         body.addWidget(self.status)
 
         buttons = QtWidgets.QHBoxLayout()
-        use = QtWidgets.QPushButton("Use this masjid")
-        use.setObjectName("primary")
-        use.clicked.connect(self.use)
+        self.use_button = QtWidgets.QPushButton("Use this masjid")
+        self.use_button.setObjectName("primary")
+        self.use_button.clicked.connect(self.use)
         cancel = QtWidgets.QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
-        buttons.addWidget(use)
+        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button.clicked.connect(self.stop)
+        self.stop_button.hide()
+        self.back_button = QtWidgets.QPushButton("Back to results")
+        self.back_button.clicked.connect(self.back_to_list)
+        self.back_button.hide()
+        buttons.addWidget(self.use_button)
+        buttons.addWidget(self.stop_button)
+        buttons.addWidget(self.back_button)
         buttons.addWidget(cancel)
         buttons.addStretch(1)
         body.addLayout(buttons)
+
+    def back_to_list(self) -> None:
+        """Show the list of masjids again, in place of the timeline."""
+        self.pages.setCurrentWidget(self.listing)
+        self.back_button.hide()
+        self.stop_button.hide()
+        if self.rows:
+            self.status.setText("Found %d. Pick one, then press Use this masjid." % len(self.rows))
+
+    def stop(self) -> None:
+        """Give up on the check that is running. It stops at the next step it takes."""
+        if self.trail is not None and self.busy:
+            self.trail.cancel()
+            self.stop_button.setEnabled(False)
+            self.status.setText("Stopping, after the step it is on…")
+
+    def done(self, result: int) -> None:
+        # a check still running has no one to tell any more: stop it rather than leave it
+        # opening pages in a browser for a window that has gone
+        if self.trail is not None:
+            self.trail.cancel()
+        self.checking.timer.stop()
+        super().done(result)
 
     def look(self) -> None:
         text = self.box.text().strip()
         if not text or self.busy:
             return
         self.busy = True
+        self.back_to_list()
         self.status.setText("Searching…")
 
         def work() -> None:
@@ -934,25 +974,36 @@ class MasjidPicker(QtWidgets.QDialog):
         # clock can read, and saving one of those would replace times that
         # work with none at all.
         self.busy = True
-        self.status.setText("Checking %s…" % name)
-
-        def progress(text: str) -> None:
-            ui.post(lambda: self.status.setText(text))
+        trail = self.trail = timeline.Timeline()
+        self.checking.watch(trail)
+        self.pages.setCurrentWidget(self.checking)
+        self.use_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.stop_button.show()
+        self.back_button.hide()
+        self.status.setText("Checking %s. This can take a minute; Stop gives up." % name)
 
         def work() -> None:
             try:
-                proposal = masjids_mod.propose(entry, rows, progress=progress)
+                proposal = masjids_mod.propose(entry, rows, trail=trail)
             except Exception as exc:            # a check must never crash
                 proposal = {"kind": "none", "status": "%s: %s" % (
                     name, str(exc)[:90] or exc.__class__.__name__)}
-            ui.post(lambda: self.proposed(index, proposal))
+            ui.post(lambda: self.proposed(index, proposal, trail))
 
         threading.Thread(target=work, name="floating-clock-masjid-verify",
                          daemon=True).start()
 
-    def proposed(self, index: int, proposal: dict) -> None:
+    def proposed(self, index: int, proposal: dict, trail: timeline.Timeline | None = None) -> None:
         self.busy = False
         kind = proposal.get("kind")
+        # the timeline is closed by whatever ran the check; if that was cut short, close it here
+        (trail or self.trail or timeline.Timeline()).finish(
+            "none" if kind == "none" else "found", proposal.get("status") if kind == "none" else "")
+        self.checking.stop()
+        self.use_button.setEnabled(True)
+        self.stop_button.hide()
+        self.back_button.show()
         if kind == "none":
             self.status.setText("%s  Nothing was changed." % proposal.get("status", ""))
         else:

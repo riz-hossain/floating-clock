@@ -23,7 +23,7 @@ from . import (
     settings as cfg, themes, widgets as w, win32util as w32,
 )
 from . import __version__
-from . import cast as cast_mod, masjids as masjids_mod, routines as routines_mod
+from . import cast as cast_mod, masjids as masjids_mod, routines as routines_mod, timeline
 from .timetext import clock_text, parse_clock_time
 from .calendars_ui import CalendarsPage
 
@@ -1017,7 +1017,8 @@ class SettingsUI(CalendarsPage):
         box = w.Field(row, ui, width=34, placeholder="Calgary, a postal code, or your masjid's name")
         box.pack(side="left", fill="x", expand=True)
 
-        state: dict = {"rows": [], "busy": False, "pending": None}
+        state: dict = {"rows": [], "busy": False, "pending": None, "trail": None,
+                       "showing": "list"}         # or "timeline", while a check is on show
 
         note = w.label(frame, ui, "", 9, colour=p.muted,
                        wraplength=px(520), justify="left")
@@ -1028,6 +1029,36 @@ class SettingsUI(CalendarsPage):
 
         listing = w.RowList(frame, ui, empty="Nothing found yet", meta_width=0,
                             min_height=6)
+        # Choosing a masjid takes a while, and a line of small print is no way to sit
+        # through it: while it works the list gives way to a timeline of what is tried.
+        checking = w.TimelineView(frame, ui)
+
+        def back_to_list() -> None:
+            """Show the list of masjids again, in place of the timeline."""
+            if state["showing"] == "timeline":
+                checking.pack_forget()
+                listing.pack(fill="both", expand=True, pady=(px(10), 0), before=note)
+                state["showing"] = "list"
+            back_button.pack_forget()
+            stop_button.pack_forget()
+            if state["rows"]:
+                say("Found %d. Pick one, then press Use this masjid." % len(state["rows"]))
+
+        def stop() -> None:
+            """Give up on the check that is running. It stops at the next step it takes."""
+            trail = state["trail"]
+            if trail is not None and state["busy"]:
+                trail.cancel()
+                stop_button.set_enabled(False)
+                say("Stopping, after the step it is on\u2026")
+
+        def on_destroy(event) -> None:
+            # a check still running has no one to tell any more: stop it, rather than leave
+            # it opening pages in a browser for a window that has gone
+            if event.widget is win and state["trail"] is not None:
+                state["trail"].cancel()
+
+        win.bind("<Destroy>", on_destroy, add="+")
 
         def show(found, trouble) -> None:
             state["busy"] = False
@@ -1056,6 +1087,7 @@ class SettingsUI(CalendarsPage):
             if not text or state["busy"]:
                 return
             state["busy"] = True
+            back_to_list()
             say("Searching…")
 
             def work() -> None:
@@ -1102,17 +1134,21 @@ class SettingsUI(CalendarsPage):
             # the clock can read, and saving one of those would replace times
             # that work with none at all.
             state["busy"] = True
-            say("Checking %s…" % name)
-
-            def progress(text: str) -> None:
-                try:
-                    self.root.after(0, say, text)
-                except Exception:
-                    pass
+            trail = state["trail"] = timeline.Timeline()
+            height = max(listing.winfo_height(), px(300))
+            listing.pack_forget()
+            checking.pack(fill="both", expand=True, pady=(px(10), 0), before=note)
+            state["showing"] = "timeline"
+            checking.watch(trail, height=height)
+            use_button.set_enabled(False)
+            back_button.pack_forget()
+            stop_button.set_enabled(True)
+            stop_button.pack(side="left", padx=(px(8), 0), before=cancel_button)
+            say("Checking %s. This can take a minute; Stop gives up." % name)
 
             def work() -> None:
                 try:
-                    proposal = masjids_mod.propose(entry, state["rows"], progress=progress)
+                    proposal = masjids_mod.propose(entry, state["rows"], trail=trail)
                 except Exception as exc:        # a check must never crash
                     proposal = {"kind": "none", "status": "%s: %s" % (
                         name, str(exc)[:90] or exc.__class__.__name__)}
@@ -1126,6 +1162,13 @@ class SettingsUI(CalendarsPage):
                 if not win.winfo_exists():
                     return
                 kind = proposal.get("kind")
+                # the timeline is closed by whatever ran the check; if that was cut short, close it here
+                trail.finish("none" if kind == "none" else "found",
+                             proposal.get("status") if kind == "none" else "")
+                checking.stop()
+                use_button.set_enabled(True)
+                stop_button.pack_forget()
+                back_button.pack(side="left", padx=(px(8), 0), before=cancel_button)
                 if kind == "none":
                     say("%s  Nothing was changed." % proposal.get("status", ""))
                 else:
@@ -1145,10 +1188,16 @@ class SettingsUI(CalendarsPage):
 
         buttons = tk.Frame(frame, bg=p.window)
         buttons.pack(fill="x", pady=(px(12), 0))
-        w.Button(buttons, ui, "Use this masjid", command=use,
-                 kind="primary", padx=16).pack(side="left")
-        w.Button(buttons, ui, "Cancel", command=win.destroy,
-                 kind="quiet", padx=16).pack(side="left", padx=(px(8), 0))
+        use_button = w.Button(buttons, ui, "Use this masjid", command=use,
+                              kind="primary", padx=16)
+        use_button.pack(side="left")
+        cancel_button = w.Button(buttons, ui, "Cancel", command=win.destroy,
+                                 kind="quiet", padx=16)
+        cancel_button.pack(side="left", padx=(px(8), 0))
+        # shown by turns, between those two: Stop while it works, Back to results after
+        stop_button = w.Button(buttons, ui, "Stop", command=stop, kind="default", padx=16)
+        back_button = w.Button(buttons, ui, "Back to results", command=back_to_list,
+                               kind="default", padx=16)
 
         win.update_idletasks()
         win.geometry("+%d+%d" % (

@@ -37,6 +37,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         failures.append(name)
 
 
+real_propose = masjids.propose
 soon = datetime.now() + timedelta(hours=1)
 prayer.load = lambda base, url="", now=None, force=False, fetcher=None, **kw: (
     [prayer.Prayer("Fajr", soon)], "Test Masjid · updated just now")
@@ -191,6 +192,146 @@ try:
     check("forgets where the masjid was, and that it was borrowed",
           app.s.get("prayer_lat") is None and app.s.get("prayer_proxy_for") == ""
           and app.s.get("prayer_masjid_name") == "", repr(app.s.get("prayer_proxy_for")))
+
+    print("the timeline of a check")
+    import threading
+
+    from floating_clock import timeline
+
+    masjids.propose = real_propose               # the real one, which reports each step
+
+    def five():
+        day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        return [prayer.Prayer(n, day + timedelta(hours=h, minutes=m))
+                for n, (h, m) in zip(prayer.DAILY, ((6, 15), (13, 45), (17, 45), (19, 28), (21, 0)))]
+
+    gate, entered, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_inspect(address, where=None):
+        """A read that takes as long as it is let to, and hears Stop."""
+        line = timeline.current()
+        try:
+            with line.step("ask") as step:
+                entered.set()
+                while not gate.is_set():
+                    time.sleep(0.02)
+                    line.check()
+                step.ok("received its timetable")
+            prayers = five()
+            return {"prayers": prayers, "status": "ok", "source": "mawaqit", "how": "", "exact": True,
+                    "times": masjids._day_times(prayers)}
+        finally:
+            finished.set()
+
+    def begin():
+        gate.clear()
+        entered.clear()
+        finished.clear()
+        win = open_picker()
+        search_and_pick(win)
+        act(lambda: find(win, w.Button, "Use this masjid").command(), 10, entered.is_set)
+        return win
+
+    def drawn_text(view):
+        canvas = view.canvas
+        return [canvas.itemcget(i, "text") for i in canvas.find_all() if canvas.type(i) == "text"]
+
+    real_inspect = masjids.inspect
+    masjids.inspect = slow_inspect
+    kept = app.s.get("prayer_ics_url", "")
+    win = begin()
+    view = find(win, w.TimelineView)
+    check("choosing a masjid swaps the list for a timeline of what is being done",
+          view.winfo_manager() == "pack" and find(win, w.RowList).winfo_manager() == "")
+    check("with Stop to give up, and the button that would start another check out of the way",
+          find(win, w.Button, "Stop").winfo_manager() == "pack" and find(win, w.Button, "Back to results").winfo_manager() == ""
+          and not find(win, w.Button, "Use this masjid").enabled)
+    check("the worker gets as far as its first step", entered.is_set())
+    act(lambda: None, 0.5, lambda: False)
+    check("the window is drawing it, with the step that is running and how long it has taken",
+          any("Asking mawaqit.net" in t for t in drawn_text(view)) and any("Checking" in t for t in drawn_text(view)),
+          str(drawn_text(view)[:6]))
+    check("and the check is under way, with a bar that has begun to move",
+          view.line.snapshot()["busy"] and view.line.snapshot()["fraction"] > 0)
+    check("the status line says that it takes a while and that Stop gives up",
+          any("Stop gives up" in t for t in labels(win)), "; ".join(labels(win))[-200:])
+    gate.set()
+    shown = lambda: any("Check they match" in t for t in labels(win))   # noqa: E731
+    check("when it is done, what it found is shown as before", pump(10, shown), "; ".join(labels(win))[-200:])
+    check("Stop goes, Back to results comes, and the button works again",
+          find(win, w.Button, "Stop").winfo_manager() == "" and find(win, w.Button, "Back to results").winfo_manager() == "pack"
+          and find(win, w.Button, "Use this masjid").enabled)
+    check("the timeline says it found something", view.line.snapshot()["outcome"] == "found")
+    check("and nothing has been saved yet", app.s.get("prayer_ics_url", "") == kept)
+    act(lambda: find(win, w.Button, "Back to results").command(), 2, lambda: find(win, w.RowList).winfo_manager() == "pack")
+    check("Back to results shows the list again", find(win, w.RowList).winfo_manager() == "pack" and view.winfo_manager() == "")
+    win.destroy()
+
+    print("Stop")
+    win = begin()
+    view = find(win, w.TimelineView)
+    check("a check is under way", entered.is_set())
+    act(lambda: find(win, w.Button, "Stop").command(), 10, finished.is_set)
+    check("Stop is heard by the worker in the middle of a step", finished.is_set())
+    said = lambda: any("Stopped" in t and "Nothing was changed" in t for t in labels(win))   # noqa: E731
+    check("and reported: stopped, and nothing changed", pump(10, said), "; ".join(labels(win))[-200:])
+    check("the timeline says it was stopped", view.line.snapshot()["outcome"] == "stopped", str(view.line.snapshot()["outcome"]))
+    check("what was running is not left spinning", all(r["state"] != "running" for r in view.line.snapshot()["rows"]))
+    check("nothing was saved, and the dialog stays open", app.s.get("prayer_ics_url", "") == kept and win.winfo_exists())
+    check("Back to results is offered", find(win, w.Button, "Back to results").winfo_manager() == "pack")
+    win.destroy()
+
+    print("closing the window in the middle of a check")
+    win = begin()
+    view = find(win, w.TimelineView)
+    line = view.line
+    check("a check is under way", entered.is_set())
+    win.destroy()
+    check("closing the window stops it, so it does not go on opening pages for nobody", pump(10, finished.is_set))
+    check("and the timeline says so", pump(5, lambda: line.snapshot()["outcome"] == "stopped"), str(line.snapshot()["outcome"]))
+    masjids.inspect = real_inspect
+
+    print("a check that is not the real one")
+    masjids.propose = lambda entry, rows, progress=None, **k: {"kind": "none", "status": "Erin Centre: nothing readable."}
+    win = open_picker()
+    search_and_pick(win)
+    act(lambda: find(win, w.Button, "Use this masjid").command(), 10, lambda: any("Nothing was changed" in t for t in labels(win)))
+    view = find(win, w.TimelineView)
+    check("a worker that never reports still leaves a timeline that ends",
+          view.line.snapshot()["outcome"] == "none" and not view.line.snapshot()["busy"])
+    win.destroy()
+    masjids.propose = real_propose
+
+    print("the picture")
+    top = tk.Toplevel(app.root)
+    top.withdraw()
+    from floating_clock import palette as pal_mod
+    for mode in ("dark", "light"):
+        ui = w.Ui(top, pal_mod.resolve(mode, (127, 40, 255)), 1.0)
+        sample = timeline.Timeline()
+        sample.plan("Test Masjid", [timeline.Section("site", "The masjid's own website", "example.org", timeline.WEBSITE)])
+        sample.section("site")
+        sample.start("pages", "reading /prayer-times, /salah-timings and 2 more")
+        for width in (260, 420, 700):
+            holder = tk.Frame(top, width=width, height=300)
+            holder.pack_propagate(False)
+            picture = w.TimelineView(holder, ui, height=300)
+            picture.canvas.configure(width=width)
+            picture.pack(fill="both", expand=True)
+            picture.watch(sample)
+            picture._draw()
+            over = []
+            for item in picture.canvas.find_all():
+                if picture.canvas.type(item) != "text":
+                    continue
+                left, _top, right, _bottom = picture.canvas.bbox(item)
+                if right > width:
+                    over.append((picture.canvas.itemcget(item, "text"), right))
+            check("in %s mode at %d pixels nothing runs off the edge, measured with the real font" % (mode, width),
+                  not over, str(over[:1]))
+            picture.stop()
+            holder.destroy()
+    top.destroy()
 except Exception:
     import traceback
 
