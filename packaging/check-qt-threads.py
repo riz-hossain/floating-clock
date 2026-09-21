@@ -12,6 +12,11 @@ directly and never let the event loop run.
 Here the event loop runs. What the workers fetch is replaced with canned
 answers, so this needs no network.
 
+The calendar dialogs hand back failures the same way, and a lambda that names
+the exception it caught raises NameError when it finally runs -- Python deletes
+`exc` when its except block ends -- which is only logged. The last checks make
+each of those workers fail and read what the dialog says.
+
     PYTHONPATH=<folder holding floating_clock> QT_QPA_PLATFORM=offscreen \\
         python packaging/check-qt-threads.py
 """
@@ -29,9 +34,9 @@ os.environ["FLOATING_CLOCK_HOME"] = tempfile.mkdtemp(prefix="floating-clock-chec
 
 from PySide6 import QtGui, QtWidgets  # noqa: E402
 
-from floating_clock import masjids, prayer  # noqa: E402
+from floating_clock import caldav, google_oauth, ics, masjids, prayer, providers  # noqa: E402
 from floating_clock.qt.clock import QtClock  # noqa: E402
-from floating_clock.qt.settings import MasjidPicker, SettingsDialog  # noqa: E402
+from floating_clock.qt.settings import AddCalendarDialog, MasjidPicker, SettingsDialog  # noqa: E402
 
 failures: list[str] = []
 
@@ -314,6 +319,52 @@ for mode in ("dark", "light"):
     image = view.grab().toImage()
     check("it paints in %s mode, and the picture is not blank" % mode,
           image.width() > 0 and len({image.pixel(x, y) for x in range(0, image.width(), 9) for y in range(0, image.height(), 9)}) > 6)
+
+print("a calendar that cannot be added says why")
+
+
+def failing(error, message):
+    """A stand-in for a call to a server that fails the way the real one does."""
+    def fake(*args, **kwargs):
+        raise error(message)
+    return fake
+
+
+def adding(kind: str, email: str) -> AddCalendarDialog:
+    """The add-a-calendar dialog, on the step that a provider of this kind leads to."""
+    page = AddCalendarDialog(dialog)
+    page.detected(providers.Detection(email, providers.domain_of(email), providers.PROVIDERS[kind]))
+    return page
+
+
+def press(page, caption: str) -> None:
+    buttons = [b for b in page.findChildren(QtWidgets.QPushButton) if b.text() == caption]
+    assert len(buttons) == 1, "%d buttons say %r" % (len(buttons), caption)
+    buttons[0].click()
+
+
+# Each reason is its own, so that seeing it proves this failure got through and
+# not some other message the dialog might have said.
+clock.s["google_client_id"] = "check-client"
+page = adding("google", "someone@gmail.com")
+google_oauth.sign_in = failing(google_oauth.GoogleError, "the client id was refused")
+press(page, "Sign in with Google")
+check("a Google sign-in that fails says what went wrong",
+      spin(5, lambda: "the client id was refused" in page.status.text()), "status %r" % page.status.text())
+
+page = adding("icloud", "someone@icloud.com")
+page.secret.setText("not-the-password")
+caldav.discover = failing(caldav.CalDavError, "the app password was refused")
+press(page, "Find calendars")
+check("so does a calendar server that will not let it in",
+      spin(5, lambda: "the app password was refused" in page.status.text()), "status %r" % page.status.text())
+
+page = adding("microsoft", "someone@outlook.com")
+page.link.setText("https://example.invalid/calendar.ics")
+ics.fetch = failing(ics.IcsError, "that page is not a calendar")
+press(page, "Add")
+check("so does an iCal address that does not work",
+      spin(5, lambda: "that page is not a calendar" in page.status.text()), "status %r" % page.status.text())
 
 print()
 if failures:
