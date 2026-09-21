@@ -1,0 +1,257 @@
+{
+ "about": "Corrections to the LiveAzan research directory that make-directory.py applies on every run, so refreshing the source does not bring the mistakes back. 'website' puts the right address in; 'clear' leaves the masjid on the map with no website, so it can borrow a neighbour's times; 'remove' drops something that is not a masjid. A rule applies only while the research still holds the website in 'was'. Found by packaging/audit-directory-websites.py.",
+ "overrides": [
+  {
+   "name": "Islamic Information Centre of Calgary",
+   "city": "Calgary",
+   "action": "clear",
+   "was": "https://www.iicoc.com",
+   "why": "The domain is for sale (HugeDomains). No centre of this name turned up at 1207 11 Ave SW; the live Islamic Information Society of Calgary (iisc.ca) is a different body."
+  },
+  {
+   "name": "MAC Edmonton Islamic Centre",
+   "city": "Edmonton",
+   "action": "website",
+   "was": "https://www.macnet.ca/local/edmonton",
+   "website": "https://centres.macnet.ca/rahmamosque/",
+   "why": "macnet.ca/local/edmonton now lands on a 2022 news article. MAC's page for its Edmonton centre (Rahma Mosque, 6104 172 St NW) is on centres.macnet.ca."
+  },
+  {
+   "name": "Masjid Al-Salaam",
+   "city": "Burnaby",
+   "action": "website",
+   "was": "https://www.masjidalsalaam.ca",
+   "website": "https://org.thebcma.com/burnaby",
+   "why": "masjidalsalaam.ca is Masjid Al-Salaam in Edmonton. The Burnaby one is the BC Muslim Association's Burnaby branch (5060 Canada Way), whose page is headed 'Masjid Al-Salaam & Education Center'."
+  },
+  {
+   "name": "Grand Mosque of Winnipeg",
+   "city": "Winnipeg",
+   "action": "website",
+   "was": "https://www.winnipegmosque.com",
+   "website": "https://miaonline.org/winnipeg-grand-mosque/",
+   "why": "winnipegmosque.com is a professor's personal site. The Grand Mosque (2445 Waverley St) is run by the Manitoba Islamic Association, which has a page for it."
+  },
+  {
+   "name": "Alliston Masjid (Muslims of Alliston Centre)",
+   "city": "Alliston",
+   "action": "clear",
+   "was": "https://www.allistonmasjid.com/",
+   "why": "The domain no longer exists and no other site was found."
+  },
+  {
+   "name": "Windsor Islamic Association Educational & Community Centre (Amherstburg)",
+   "city": "Amherstburg",
+   "action": "clear",
+   "was": "https://windsorislamicassociation.com/",
+   "why": "Filed with the association's front page, which shows the Windsor mosque's times. This is a different site (5791 N Townline Rd), described on the association's own page as a school campus with no prayer hall."
+  },
+  {
+   "name": "Brampton Makki Masjid",
+   "city": "Brampton",
+   "action": "website",
+   "was": "https://www.makkimasjid.com",
+   "website": "https://www.makkimasjid.ca/",
+   "why": "makkimasjid.com is Makki Masjid in Chicago (3418 W Ainslie St). The Brampton masjid, of the Islamic Society of Peel, is on makkimasjid.ca."
+  },
+  {
+   "name": "Jamiat-Ul-Ansar of Brampton",
+   "city": "Brampton",
+   "action": "website",
+   "was": "http://www.jamiatulansar.ca/",
+   "website": "https://jamiatalansar.ca/",
+   "why": "www.jamiatulansar.ca does not resolve; the bare domain redirects to jamiatalansar.ca, the masjid's own site."
+  },
+  {
+   "name": "Al-Aqsa Mosque",
+   "city": "Cornwall",
+   "action": "clear",
+   "was": "http://www.alaqsamasjid.ca/",
+   "why": "The domain no longer exists. The only website OpenStreetMap holds for it is a business-directory listing, not the masjid's."
+  },
+  {
+   "name": "Hamilton Mountain Masjid",
+   "city": "Hamilton",
+   "action": "website",
+   "was": "https://hamiltonmosque.com/",
+   "website": "https://www.mahcanada.com/mosques/hamilton",
+   "why": "hamiltonmosque.com redirects to the front page of the Muslim Association of Hamilton, which runs three mosques. This one, at 1545 Stone Church Rd E, has its own page."
+  },
+  {
+   "name": "Hamilton Mountain Mosque (Ibrahim Jame Masjid)",
+   "city": "Hamilton",
+   "action": "website",
+   "was": "https://www.hamiltonmosque.ca",
+   "website": "https://www.mahcanada.com/mosques/hamilton",
+   "why": "The domain no longer exists. Same address (1545 Stone Church Rd E) as Hamilton Mountain Masjid, whose page this is."
+  },
+  {
+   "name": "Muslim Association of Hamilton",
+   "city": "Hamilton",
+   "action": "clear",
+   "was": "https://www.mahamilton.ca",
+   "why": "The domain no longer exists. The association's site (mahcanada.com) covers three mosques, and this entry's address (1165 Upper James St) is not one of them; Hamilton Mountain Mosque carries the association's page."
+  },
+  {
+   "name": "Al Falah Islamic Centre (Kitchener)",
+   "city": "Kitchener",
+   "action": "clear",
+   "was": "https://alfalahkitchener.org",
+   "why": "The hosting account is suspended. MAWAQIT lists an Al-Falah Centre in Kitchener 2.6 km from this entry's coordinates with no address, so it cannot be confirmed as the same place."
+  },
+  {
+   "name": "MAC London Islamic Centre (Westmount Center)",
+   "city": "London",
+   "action": "website",
+   "was": "https://www.macnet.ca/local/london",
+   "website": "https://centres.macnet.ca/westmount/",
+   "why": "macnet.ca/local/london now lands on a 2020 newspaper op-ed. The centre named is Westmount Masjid (312 Commissioners Rd W), which has a page on centres.macnet.ca. The research address (649 Wilkins St) disagrees with the name."
+  },
+  {
+   "name": "Imam Bukhari Centre",
+   "city": "Milton",
+   "action": "website",
+   "was": "https://ahlehadithcanada.org/",
+   "website": "https://ahlehadithcanada.org/toronto/",
+   "why": "The front page of the national Ahle-Hadith Society says 'please select your centre'. The page for this centre (50 Steeles Ave E, Milton) is /toronto/, which names Imam Bukhari Centre."
+  },
+  {
+   "name": "Anatolia Islamic Centre",
+   "city": "Mississauga",
+   "action": "website",
+   "was": "https://www.anatoliaislamiccentre.com",
+   "website": "https://anatoliacentre.ca/",
+   "why": "The domain no longer exists; the centre is on anatoliacentre.ca."
+  },
+  {
+   "name": "Masjid Dar Al-Tawheed",
+   "city": "Mississauga",
+   "action": "website",
+   "was": "https://www.daraltawheed.com",
+   "website": "https://daraltawheed.ca/",
+   "why": "The .com no longer exists; the centre is on daraltawheed.ca."
+  },
+  {
+   "name": "Muslim World League",
+   "city": "Mississauga",
+   "action": "clear",
+   "was": "http://www.mwlcanada.org/",
+   "why": "The domain redirects to a casino-spam site. The listing is an NGO office rather than a congregation, and its address (2630 Royal Windsor Dr) is doubtful; left in place for a person to decide."
+  },
+  {
+   "name": "Sayeda Khadija Centre",
+   "city": "Mississauga",
+   "action": "clear",
+   "was": "https://www.sayedakhadija.com",
+   "why": "The domain no longer exists. The Sayeda Khadija Centre is at 7150 Edwards Blvd (two other entries, on sayedakhadijacentre.com); 6120 Montevideo Rd, where this entry is, is the Ar-Rehman Islamic Centre."
+  },
+  {
+   "name": "Pembroke Islamic Centre",
+   "city": "Pembroke",
+   "action": "clear",
+   "was": "https://www.pembrokeislamiccentre.ca/",
+   "why": "The domain no longer exists and no other site was found."
+  },
+  {
+   "name": "Imam Mahdi Islamic Centre",
+   "city": "Thornhill",
+   "action": "website",
+   "was": "https://www.imic.ca",
+   "website": "https://imammahdi.ca/",
+   "why": "imic.ca is now a domain-for-sale page. The centre (7340 Bayview Ave) is on imammahdi.ca, which its other entry (Markham) already uses."
+  },
+  {
+   "name": "Ja'ffari Islamic Centre",
+   "city": "Thornhill",
+   "action": "website",
+   "was": "https://www.jfrcc.org",
+   "website": "https://jaffari.org/jcc/",
+   "why": "The domain no longer exists; the centre's page is on jaffari.org."
+  },
+  {
+   "name": "Abu Huraira Centre",
+   "city": "Toronto",
+   "action": "website",
+   "was": "https://www.abuhurairacenter.com",
+   "website": "https://www.abuhuraira.org/",
+   "why": "The domain no longer exists; the centre is on abuhuraira.org. This entry's address and coordinates (100 McLevin Ave, Scarborough) do not match the centre's (270 Yorkland Blvd)."
+  },
+  {
+   "name": "Islamic Institute of Toronto",
+   "city": "Toronto",
+   "action": "website",
+   "was": "https://www.iit.org",
+   "website": "https://islam.ca/",
+   "why": "iit.org is the alumni site of the Indian Institute of Technology. The Islamic Institute of Toronto (1630 Neilson Rd) is on islam.ca."
+  },
+  {
+   "name": "Ismaili Centre Toronto",
+   "city": "Toronto",
+   "action": "clear",
+   "was": "https://www.theismaili.org",
+   "why": "Redirects to the.ismaili, the global Ismaili community site, which is drawn by script and has no page a program can read for this centre. A jamatkhana that publishes no daily times."
+  },
+  {
+   "name": "Muslim Welfare Center",
+   "city": "Toronto",
+   "action": "clear",
+   "was": "https://www.muslimwelfare.com",
+   "why": "The page serves nothing a program can read, and nothing places a masjid at this address (Muslim Welfare Canada's musalla is in Mississauga)."
+  },
+  {
+   "name": "The Reign of Islamic Da'Wah (TROID)",
+   "city": "Toronto",
+   "action": "website",
+   "was": "https://www.tfreed.org",
+   "website": "https://www.troid.org/",
+   "why": "tfreed.org no longer exists. TROID's own site is troid.org, which runs Masjid al-Furqan at 874 Weston Rd. It turns programs away (403), so the page itself could not be read."
+  },
+  {
+   "name": "Baitul Islam Mosque",
+   "city": "Vaughan",
+   "action": "website",
+   "was": "https://www.ahmadiyya.ca/",
+   "website": "https://ahmadiyya.ca/mosque/baitul-islam-mosque/",
+   "why": "Filed with the front page of the Ahmadiyya community's national site, not the mosque's page."
+  },
+  {
+   "name": "Muslim Association of Canada (MAC) Waterloo",
+   "city": "Waterloo",
+   "action": "clear",
+   "was": "https://www.macnet.ca/local/waterloo",
+   "why": "macnet.ca/local/waterloo now lands on a 2020 news article. MAC's Waterloo centres are the Islamic Centre of Waterloo (510 Erbsville Rd, already listed) and Kitchener Masjid; nothing of MAC's is at this entry's address, and its coordinates are on Waterloo Masjid, which is not MAC's."
+  },
+  {
+   "name": "Baitul Ehsaan Mosque",
+   "city": "Windsor",
+   "action": "website",
+   "was": "https://www.ahmadiyya.ca/mosques/baitul-ehsaan",
+   "website": "https://ahmadiyya.ca/mosque/baitul-ehsan/",
+   "why": "404: the page is spelt baitul-ehsan and lives under /mosque/."
+  },
+  {
+   "name": "Dominion Mosque",
+   "city": "Windsor",
+   "action": "website",
+   "was": "https://www.windsormosque.com",
+   "website": "https://windsorislamicassociation.com/",
+   "why": "www.windsormosque.com fails its TLS handshake; the bare domain redirects to the Windsor Islamic Association, whose Windsor mosque this is (1320 Northwood St)."
+  },
+  {
+   "name": "Windsor Islamic Association (Masjid Al-Hijrah)",
+   "city": "Windsor",
+   "action": "website",
+   "was": "https://www.windsorislam.com",
+   "website": "https://windsorislamicassociation.com/",
+   "why": "The domain no longer exists. Same address and telephone as Dominion Mosque, the association's Windsor mosque, whose site this is."
+  },
+  {
+   "name": "Islamic Centre of Quebec",
+   "city": "Montreal",
+   "action": "website",
+   "was": "https://www.icquebec.org",
+   "website": "https://icqmontreal.com/",
+   "why": "icquebec.org (which also fails its certificate) is now Les Incroyables Comestibles du Quebec, a food-sharing group. The centre's own site, titled Islamic Centre of Quebec, is icqmontreal.com."
+  }
+ ]
+}
