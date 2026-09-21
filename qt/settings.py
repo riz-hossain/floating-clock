@@ -1181,7 +1181,8 @@ class AddCalendarDialog(QtWidgets.QDialog):
                         self.owner.s.get("google_client_secret", ""), login_hint=found.email)
                     calendars = google_oauth.list_calendars(token["access_token"])
                 except google_oauth.GoogleError as exc:
-                    ui.post(lambda: self.say("Sign-in failed: %s" % exc))
+                    message = str(exc)      # exc is unbound again by the time the UI thread runs the lambda
+                    ui.post(lambda: self.say("Sign-in failed: %s" % message))
                     return
                 ui.post(lambda: show(token, calendars))
             threading.Thread(target=work, daemon=True).start()
@@ -1262,7 +1263,8 @@ class AddCalendarDialog(QtWidgets.QDialog):
             try:
                 calendars = caldav.discover(found.email, password, found.provider.caldav_base)
             except caldav.CalDavError as exc:
-                ui.post(lambda: self.say("Could not connect: %s" % exc))
+                message = str(exc)          # exc is unbound again by the time the UI thread runs the lambda
+                ui.post(lambda: self.say("Could not connect: %s" % message))
                 return
             ui.post(lambda: self._show_calendars(calendars))
         threading.Thread(target=work, daemon=True).start()
@@ -1341,7 +1343,8 @@ class AddCalendarDialog(QtWidgets.QDialog):
                 try:
                     ics.fetch(url)
                 except ics.IcsError as exc:
-                    ui.post(lambda: self.say("That address does not work: %s" % exc))
+                    message = str(exc)      # exc is unbound again by the time the UI thread runs the lambda
+                    ui.post(lambda: self.say("That address does not work: %s" % message))
                     return
                 ui.post(lambda: self._save_ics(found, url))
             threading.Thread(target=work, daemon=True).start()
