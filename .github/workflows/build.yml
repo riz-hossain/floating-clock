@@ -83,6 +83,20 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-discovery.py
+      - name: The timeline of a check, offline
+        # What the picker shows while a masjid is being read: the steps, the bar,
+        # Stop, and where everything is drawn -- on a made-up clock, so a step that
+        # takes half a minute takes none.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-timeline.py
+      - name: That the reading code reports what it does
+        # The timeline is only worth having if it shows what is really happening.
+        # This drives the real page reader, the way a site is tried and the choice
+        # of what to offer on made-up networks, and reads the timeline afterwards.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-steps.py
       - name: The bundled masjid directory, offline
         # The research behind data/masjids.json has websites that are another
         # masjid's, dead, or a news article; the clock would show those times as

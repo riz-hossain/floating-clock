@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageTk
 
 from . import palette as pal
+from . import timelineview as view
 
 SS = 4  # supersampling factor for the Pillow-drawn chrome
 
@@ -1283,3 +1284,211 @@ class ScrollFrame(tk.Frame):
 
     def scroll_top(self) -> None:
         self.canvas.yview_moveto(0)
+
+
+# --- what the clock is doing --------------------------------------------------
+class TimelineView(tk.Frame):
+    """A scrolling picture of a Timeline: what the clock is doing to find a masjid's times.
+
+    Where everything goes is worked out in timelineview.py, which the Mac and Linux
+    window shares, so this only draws. It looks at the timeline a few times a second
+    from Tk's own loop; the worker doing the reading never has to reach the UI thread,
+    which Tk only allows while the main loop is running.
+    """
+
+    TICK_MS = 120           # fast enough that the spinner turns and the seconds run
+
+    def __init__(self, parent, ui: Ui, height: int = 300) -> None:
+        self.ui = ui
+        p = ui.p
+        super().__init__(parent, bg=p.field, bd=0, highlightthickness=1,
+                         highlightbackground=p.field_border, highlightcolor=p.field_border)
+        self.canvas = tk.Canvas(self, bg=p.field, bd=0, highlightthickness=0,
+                                width=ui.px(500), height=ui.px(height),
+                                yscrollincrement=ui.px(24))
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.bar = tk.Canvas(self, width=ui.px(6), bg=p.field, bd=0, highlightthickness=0)
+        self.bar.pack(side="right", fill="y", padx=(0, ui.px(3)))
+        self._thumb = self.bar.create_rectangle(0, 0, 0, 0, fill=p.control_border, outline="")
+        self.line = None
+        self.phase = 0
+        self.following = True             # keeps what is running in view, until the person scrolls
+        self._job = None
+        self._total = 1
+        self._drag_from = None
+        self.canvas.configure(yscrollcommand=self._on_scroll)
+        self.canvas.bind("<Configure>", lambda _e: self._draw())
+        self.canvas.bind("<MouseWheel>", self._wheel)
+        self.bar.bind("<Button-1>", self._bar_press)
+        self.bar.bind("<B1-Motion>", self._bar_drag)
+        self.bind("<Destroy>", self._gone)
+
+    # --- following one timeline ---------------------------------------------------------------
+    def watch(self, line, height: int | None = None) -> None:
+        """Start drawing `line`, and keep on doing so until it is over."""
+        self.line = line
+        self.following = True
+        self.phase = 0
+        if height:
+            self.canvas.configure(height=height)
+        self.canvas.yview_moveto(0)
+        self._cancel()
+        self._tick()
+
+    def stop(self) -> None:
+        """It is over: stop the clock, and draw it as it now is."""
+        self._cancel()
+        self._draw()
+
+    def _cancel(self) -> None:
+        if self._job is not None:
+            try:
+                self.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+
+    def _gone(self, event) -> None:
+        if event.widget is self:
+            self._cancel()
+            self.line = None
+
+    def _tick(self) -> None:
+        self._job = None
+        if self.line is None or not self.winfo_exists():
+            return
+        if self._draw():
+            self._job = self.after(self.TICK_MS, self._tick)
+
+    # --- drawing ------------------------------------------------------------------------------
+    def _font(self, bold: bool, small: bool):
+        return self.ui.font(9 if small else 10, "semibold" if bold else "normal")
+
+    def _measure(self, text: str, bold: bool = False, small: bool = False) -> int:
+        return self._font(bold, small).measure(text)
+
+    def _metrics(self, width: int) -> view.Metrics:
+        px = self.ui.px
+        return view.Metrics(
+            width=width, pad=px(14), icon=px(18), icon_small=px(14), indent=px(30), gap=px(10),
+            line=self.ui.font(10).metrics("linespace") + px(8),
+            small_line=self.ui.font(9).metrics("linespace") + px(3), row_gap=px(5), bar=px(6))
+
+    def _draw(self) -> bool:
+        """Draw it as it now is. True while the check is still going."""
+        line = self.line
+        if line is None or not self.winfo_exists():
+            return False
+        snap = line.snapshot()
+        self.phase = (self.phase + 1) % 8
+        width = self.canvas.winfo_width()
+        if width < self.ui.px(60):                     # not on screen yet: what it asked for
+            width = self.canvas.winfo_reqwidth()
+        out = view.layout(snap, self._metrics(width), self._measure, self.phase)
+        canvas = self.canvas
+        canvas.delete("all")
+        for item in out["items"]:
+            getattr(self, "_" + item["op"])(item)
+        self._total = max(1, out["height"])
+        canvas.configure(scrollregion=(0, 0, width, self._total))
+        if self.following and out["running"] is not None:
+            self._show(out["running"])
+        return snap["busy"]
+
+    def _colour(self, role: str) -> str:
+        p = self.ui.p
+        return {view.FG: p.fg, view.SOFT: p.fg_soft, view.MUTED: p.muted, view.DIM: p.disabled,
+                view.GOOD: p.success, view.BAD: p.danger}.get(role, p.fg)
+
+    def _rail(self, item: dict) -> None:
+        self.canvas.create_line(item["x"], item["y1"], item["x"], item["y2"],
+                                fill=self.ui.p.control_border, width=max(1, self.ui.px(2)))
+
+    def _bar(self, item: dict) -> None:
+        ui, p = self.ui, self.ui.p
+        x, y, w, h = int(item["x"]), int(item["y"]), int(item["w"]), int(item["h"])
+        self.canvas.create_image(x, y, anchor="nw", image=ui.pill(w, h, p.trough, p.field))
+        fill = {view.GOOD: p.success, view.BAD: p.danger, view.MUTED: p.muted}.get(item["role"], p.accent)
+        step = max(1, ui.px(4))                     # in steps, so as not to keep a picture for every width
+        filled = int(w * item["fraction"]) // step * step if item["fraction"] < 1.0 else w
+        if filled > 0:
+            self.canvas.create_image(x, y, anchor="nw", image=ui.pill(max(h, filled), h, fill, p.field))
+
+    def _text(self, item: dict) -> None:
+        self.canvas.create_text(
+            item["x"], item["y"] + item["h"] / 2.0, text=item["text"], anchor=item["anchor"],
+            font=self._font(item["bold"], item["small"]), fill=self._colour(item["role"]))
+
+    def _icon(self, item: dict) -> None:
+        self.canvas.create_image(item["x"], item["y"], anchor="nw",
+                                 image=self._icon_image(item["state"], int(item["d"]), item["phase"]))
+
+    def _icon_image(self, state: str, d: int, phase: int):
+        """A state's icon, antialiased by Pillow like the rest of this kit."""
+        ui, p = self.ui, self.ui.p
+        bg = p.field
+        turn = phase if state == "running" else 0
+        key = ("timeline-icon", state, d, turn, bg, p.accent, p.success, p.danger, p.muted, p.disabled)
+
+        def build() -> Image.Image:
+            S = d * SS
+            image = Image.new("RGB", (S, S), bg)
+            draw = ImageDraw.Draw(image)
+            pad = S * 0.06
+            box = (pad, pad, S - pad, S - pad)
+            stroke = max(2, round(S / 9))
+            thin = max(2, round(stroke * 0.8))
+            if state in ("done", "failed"):
+                draw.ellipse(box, fill=p.success if state == "done" else p.danger)
+                if state == "done":
+                    draw.line([(S * 0.28, S * 0.53), (S * 0.44, S * 0.68), (S * 0.73, S * 0.34)],
+                              fill="#ffffff", width=stroke, joint="curve")
+                else:
+                    draw.line((S * 0.34, S * 0.34, S * 0.66, S * 0.66), fill="#ffffff", width=stroke)
+                    draw.line((S * 0.66, S * 0.34, S * 0.34, S * 0.66), fill="#ffffff", width=stroke)
+            elif state == "running":
+                draw.ellipse(box, outline=pal.mix(p.accent, bg, 0.65), width=stroke)
+                start = -90 + turn * 45                # Pillow counts degrees clockwise from three o'clock
+                draw.arc(box, start, start + 110, fill=p.accent, width=stroke + 2)
+            elif state == "skipped":
+                draw.ellipse(box, outline=p.muted, width=thin)
+                draw.line((S * 0.32, S / 2, S * 0.68, S / 2), fill=p.muted, width=thin)
+            else:                                       # waiting
+                draw.ellipse(box, outline=p.disabled, width=thin)
+            return image.resize((d, d), Image.LANCZOS)
+
+        return ui._cached(key, build)
+
+    # --- scrolling ----------------------------------------------------------------------------
+    def _show(self, span: tuple) -> None:
+        top, bottom = span
+        room = max(1, self.canvas.winfo_height())
+        offset = self.canvas.canvasy(0)
+        if top < offset or bottom > offset + room:
+            self.canvas.yview_moveto(max(0.0, top - room / 3.0) / self._total)
+
+    def _on_scroll(self, first: str, last: str) -> None:
+        lo, hi = float(first), float(last)
+        h = self.bar.winfo_height()
+        if hi - lo >= 0.999:
+            self.bar.coords(self._thumb, 0, 0, 0, 0)
+            return
+        self.bar.coords(self._thumb, 0, lo * h, self.ui.px(6), hi * h)
+
+    def _wheel(self, event) -> str | None:
+        lo, hi = self.canvas.yview()
+        if hi - lo >= 0.999:
+            return None
+        self.following = False
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _bar_press(self, event) -> None:
+        self.following = False
+        self._drag_from = (event.y, self.canvas.yview()[0])
+
+    def _bar_drag(self, event) -> None:
+        if self._drag_from is None:
+            return
+        y0, view0 = self._drag_from
+        self.canvas.yview_moveto(view0 + (event.y - y0) / max(1, self.bar.winfo_height()))

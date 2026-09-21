@@ -49,7 +49,7 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
 
-from . import astro
+from . import astro, timeline
 
 log = logging.getLogger(__name__)
 
@@ -1044,16 +1044,35 @@ def _get(url: str, timeout: float = FETCH_TIMEOUT, opener=None) -> tuple[str, st
         raise ScrapeError(str(exc)[:80] or exc.__class__.__name__) from None
 
 
+def _paths(urls: list, limit: int = 3) -> str:
+    """"/prayer-times, /salah and 2 more": which pages, in a few words."""
+    shown = []
+    for url in urls[:limit]:
+        path = urllib.parse.urlsplit(url).path.rstrip("/") or "/"
+        shown.append(path if len(path) <= 32 else path[:29] + "...")
+    more = len(urls) - limit
+    return ", ".join(shown) + (" and %d more" % more if more > 0 else "")
+
+
 def _read_site(home_url: str, home: str, today: date, opener, deadline: float,
                started: float, where):
     """(page url, reading) from a site's home page, else from the best of the pages
     it links to that look like a prayer-times page and the frames it embeds."""
+    line = timeline.current()
     reading = extract(home, today, where)
     if reading is not None:
+        line.done("home", "found the times on it")
         return home_url, reading
+    line.done("home", "no times on it")
     subpages, frames = links(home, home_url)
+    wanted = subpages + frames
+    if wanted:
+        line.start("pages", "reading %s" % _paths(wanted))
+    else:
+        line.skip("pages", "nothing on the home page links to a prayer-times page")
 
     def grab(url):
+        line.check()
         if time.time() - started > deadline:
             return url, None
         try:
@@ -1062,7 +1081,7 @@ def _read_site(home_url: str, home: str, today: date, opener, deadline: float,
             return url, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        pages = list(pool.map(grab, subpages + frames))
+        pages = list(pool.map(grab, wanted))
     best = None
     coords = where or find_coordinates(home)
     for _url, got in pages:
@@ -1072,6 +1091,9 @@ def _read_site(home_url: str, home: str, today: date, opener, deadline: float,
         found = extract(body, today, coords)
         if found and (best is None or found["quality"] > best[1]["quality"]):
             best = (final, found)
+    if wanted:
+        line.done("pages", ("found the times on %s" % _paths([best[0]], 1)) if best
+                  else "none of its %d page%s had them" % (len(wanted), "" if len(wanted) == 1 else "s"))
     return best
 
 
@@ -1082,10 +1104,13 @@ def _read_rendered(site_url: str, static_home: str, today: date, where, render,
 
     ((page url, reading) or None, the home page as the browser drew it or None). The
     second is how a caller tells a site that is down from a site with nothing on it."""
+    line = timeline.current()
 
     def draw(url):
+        line.check()
         if time.time() - started > deadline:
             return url, None
+        line.note("browser", "drawing %s" % _paths([url], 1))
         try:
             return render(url)
         except Exception as exc:
@@ -1145,19 +1170,31 @@ def fetch(site_url: str, today: date | None = None, opener=None,
     """
     today = today or date.today()
     started = time.time()
+    line = timeline.current()
     home_url, home, trouble = site_url, "", None
+    line.start("home", "fetching it")
     try:
         home_url, home = _get(site_url, opener=opener)
     except ScrapeError as exc:
         trouble = exc
+        line.fail("home", "could not open it: %s" % exc)
 
     found = _read_site(home_url, home, today, opener, deadline, started, where) if home else None
     title = page_title(home) if home else ""
     drawn_html = None
     if found is None and render is not None:
+        line.start("browser", "starting the browser")
         found, drawn_html = _read_rendered(site_url, home, today, where, render, started,
                                            RENDER_DEADLINE_S)
         title = title or (page_title(drawn_html) if drawn_html else "")
+        if found is not None:
+            line.done("browser", "found the times on %s" % _paths([found[0]], 1))
+        elif drawn_html:
+            line.done("browser", "drew the page, but found no times on it")
+        else:
+            line.fail("browser", "could not draw the page")
+    elif found is None:
+        line.skip("browser", "no browser (Edge, Chrome or Chromium) was found on this computer")
     if found is None:
         if trouble is not None and not drawn_html:
             raise ScrapeError("could not open the site (%s)" % trouble) from None

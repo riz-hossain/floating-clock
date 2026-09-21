@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import dpt, ics, mawaqit, prayersconnect, scrape, webrender
+from . import dpt, ics, mawaqit, prayersconnect, scrape, timeline, webrender
 
 log = logging.getLogger(__name__)
 
@@ -433,8 +433,14 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
             elif not text:
                 return [], "The prayer calendar came back empty."
 
-    prayers = parse(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS))
-    prayers, doubtful = screen(prayers)
+    with timeline.current().step("check") as step:
+        prayers = parse(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS))
+        prayers, doubtful = screen(prayers)
+        if prayers:
+            # a time that was dropped is said so, not passed over as a clean pass
+            step.ok(doubtful or _looks_right(text))
+        else:
+            step.fail(note or doubtful or "no prayer times found in it")
     if not prayers:
         return [], note or doubtful or "No prayer times found in that calendar."
     if note:
@@ -528,6 +534,44 @@ _LINK_MASJIDBOX = re.compile(
     r"masjidbox\.com/prayer-times/([a-z0-9][a-z0-9_-]{2,})", re.I)
 
 
+def _looks_right(text: str) -> str:
+    """What `screen` and the reader's own checks established, for the timeline."""
+    said = "each time is plausible for its prayer, and they run in order"
+    try:
+        if _cached_source(text) == "scrape" and scrape.sun_checked(text):
+            said += "; checked against today's sunrise and sunset"
+    except Exception:
+        pass
+    return said
+
+
+def _host_of(url: str) -> str:
+    """"example.org" for "https://www.example.org/prayer"."""
+    host = urllib.parse.urlsplit(str(url or "")).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _platform_of(url: str) -> str:
+    """What a linked page is, in a few words."""
+    if mawaqit.looks_like(url):
+        return "a mawaqit.net page"
+    if prayersconnect.looks_like(url):
+        return "a PrayersConnect page"
+    if "masjidbox.com" in url:
+        return "a Masjidbox page"
+    return "an embedded page"
+
+
+def _asked(key: str, fetch):
+    """`fetch`, reported to the timeline as the one step it is."""
+    def run(address: str) -> str:
+        with timeline.current().step(key) as step:
+            text = fetch(address)
+            step.ok("received its timetable")
+            return text
+    return run
+
+
 def _embedded_page(home: str) -> str:
     """The one masjid page on a platform we read that this site embeds, or "".
 
@@ -570,54 +614,83 @@ def _fetcher_for(url: str, where=None):
     kept.
     """
     if mawaqit.looks_like(url):
-        return mawaqit.fetch
+        return _asked("ask", mawaqit.fetch)
     if prayersconnect.looks_like(url):
-        return prayersconnect.fetch
+        return _asked("ask", prayersconnect.fetch)
     if dpt.looks_like_ics(url):
         return ics.fetch
 
     def fetch_site(address: str) -> str:
+        line = timeline.current()
         # A vanity domain can redirect into a platform we read directly, so
         # settle where it really lives before deciding how to read it. A site
         # that cannot be reached at all stops here, in seconds.
-        home = dpt.resolve(address, strict=True)
+        with line.step("reach") as step:
+            home = dpt.resolve(address, strict=True)
+            step.ok("reached %s" % _host_of(home))
         if mawaqit.looks_like(home):
-            return mawaqit.fetch(home)
+            with line.step("feed") as step:
+                text = mawaqit.fetch(home)
+                step.ok("the site is a mawaqit.net page")
+                return text
         if prayersconnect.looks_like(home):
-            return prayersconnect.fetch(home)
+            with line.step("feed") as step:
+                text = prayersconnect.fetch(home)
+                step.ok("the site is a PrayersConnect page")
+                return text
         # The site's own timetable plugin, when it has one. One that is there
         # but not usable -- it stops at last year, its congregation times were
         # never entered -- does not end the search: the page may say more than
         # the plugin does. It is the message to give if nothing else works,
         # since it says what the masjid needs to fix.
         broken = None
-        try:
-            return dpt.fetch(home, resolved=True)
-        except dpt.NoApi:
-            pass
-        except dpt.DptError as exc:
-            broken = exc
+        with line.step("feed") as step:
+            try:
+                text = dpt.fetch(home, resolved=True)
+            except dpt.NoApi:
+                step.ok("the site has no timetable plug-in")
+            except dpt.DptError as exc:
+                broken = exc
+                step.ok("it has a plug-in, but not a usable one: %s" % str(exc)[:60])
+            else:
+                step.ok("the site's own prayer-times plug-in")
+                return text
         # The site may embed a page on a platform we do read. Many masjids do
         # exactly that with a mawaqit widget.
-        linked = _embedded_page(home)
-        if linked:
-            try:
-                if mawaqit.looks_like(linked):
-                    return mawaqit.fetch(linked)
-                if prayersconnect.looks_like(linked):
-                    return prayersconnect.fetch(linked)
-                return scrape.fetch(linked, where=where, render=_renderer())
-            except Exception:
-                log.info("Prayer times: the page embedded at %s did not read", linked)
+        with line.step("embed") as step:
+            linked = _embedded_page(home)
+            if not linked:
+                step.ok("none found")
+            else:
+                step.note("found %s" % _platform_of(linked))
+                try:
+                    # read on quietly: this is the same reader that reads the site
+                    # itself, and it must not write over the steps of the site
+                    with timeline.hushed():
+                        if mawaqit.looks_like(linked):
+                            text = mawaqit.fetch(linked)
+                        elif prayersconnect.looks_like(linked):
+                            text = prayersconnect.fetch(linked)
+                        else:
+                            text = scrape.fetch(linked, where=where, render=_renderer())
+                except Exception:
+                    log.info("Prayer times: the page embedded at %s did not read", linked)
+                    step.ok("found %s, but its times did not read" % _platform_of(linked))
+                else:
+                    step.ok("read the times from %s" % _platform_of(linked))
+                    return text
         # It may still be a calendar -- but one with prayers in it: a site's
         # events feed is a calendar too, and says nothing about iqama.
-        try:
-            text = ics.fetch(address)
-            now = datetime.now()
-            if parse_ics(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS)):
-                return text
-        except Exception:
-            pass
+        with line.step("calendar") as step:
+            try:
+                text = ics.fetch(address)
+                now = datetime.now()
+                if parse_ics(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS)):
+                    step.ok("it is a calendar with the prayers in it")
+                    return text
+            except Exception:
+                pass
+            step.ok("it is not a calendar of prayers")
         # Not a calendar either. Read what the page says.
         try:
             text = scrape.fetch(home, where=where, render=_renderer())
