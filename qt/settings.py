@@ -18,8 +18,8 @@ import json
 
 from .. import (
     alerts, caldav, cast as cast_mod, google_oauth, ics, orgs as orgs_mod,
-    masjids as masjids_mod, palette as pal, prayer as prayer_mod, providers, render,
-    routines as routines_mod, settings as cfg, themes, timeline, vault,
+    masjids as masjids_mod, palette as pal, pickerflow as flow, prayer as prayer_mod, providers, render,
+    routines as routines_mod, settings as cfg, themes, timeline, vault, whereami,
 )
 from ..timetext import parse_clock_time
 from . import ui
@@ -61,6 +61,7 @@ def stylesheet(p: pal.Palette) -> str:
     QPushButton { background: %(control)s; color: %(fg)s; border: none; border-radius: 14px;
                   padding: 6px 16px; }
     QPushButton#primary { background: %(accent)s; color: %(on_accent)s; }
+    QPushButton:disabled, QPushButton#primary:disabled { background: %(control)s; color: %(disabled)s; }
     QPushButton#danger { color: %(danger)s; }
     QCheckBox { spacing: 8px; }
     QSlider::groove:horizontal { height: 4px; background: %(trough)s; border-radius: 2px; }
@@ -68,7 +69,7 @@ def stylesheet(p: pal.Palette) -> str:
     QListWidget { background: %(field)s; border: 1px solid %(field_border)s; border-radius: 6px; }
     """ % dict(window=p.window, fg=p.fg, muted=p.muted, control=p.control, card=p.card,
                card_border=p.card_border, field=p.field, field_border=p.field_border,
-               accent=p.accent, on_accent=p.on_accent, danger=p.danger, trough=p.trough)
+               accent=p.accent, on_accent=p.on_accent, danger=p.danger, trough=p.trough, disabled=p.disabled)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -815,19 +816,26 @@ class SettingsDialog(QtWidgets.QDialog):
 
 
 class MasjidPicker(QtWidgets.QDialog):
-    """Search for a masjid by name or town and pick one from the list.
+    """Search for a masjid by name or town, or look around this computer, and pick one from the list.
 
     The address box still works for anyone who has a link, but nobody should
     have to go and find one: this looks the masjid up, and knows which of the
     things it finds can actually supply times.
+
+    What is on show and what the buttons say at each moment is decided in
+    pickerflow, which the Windows window shares; this only applies it.
     """
 
     def __init__(self, owner) -> None:
         super().__init__(owner)
         self.owner = owner
         self.rows: list = []
-        self.busy = False
-        self.pending: dict | None = None       # a proposal shown and waiting for a second press
+        self.mode = flow.LIST
+        self.pending: dict | None = None       # times found for a masjid, waiting for Done
+        self.again = None                      # what Try again repeats
+        self.listed = ""                       # what was said about the list, for when Back shows it again
+        self.stopping = False
+        self.trail: timeline.Timeline | None = None
         self.setWindowTitle("Find your masjid")
         self.setMinimumSize(560, 460)
         self.setStyleSheet(owner.styleSheet())
@@ -844,7 +852,8 @@ class MasjidPicker(QtWidgets.QDialog):
             "the rest the clock reads the masjid's own website, the way you "
             "would, and shows you what it read before keeping it. Where a "
             "masjid publishes nothing readable, it can use the nearest one "
-            "that does. Map data © OpenStreetMap contributors.")
+            "that does. Near me lists the masjids around where this computer "
+            "is. Map data © OpenStreetMap contributors.")
         note.setObjectName("muted")
         note.setWordWrap(True)
         body.addWidget(note)
@@ -854,14 +863,18 @@ class MasjidPicker(QtWidgets.QDialog):
         self.box.setPlaceholderText("Calgary, a postal code, or your masjid's name")
         self.box.returnPressed.connect(self.look)
         row.addWidget(self.box, 1)
-        search = QtWidgets.QPushButton("Search")
-        search.setObjectName("primary")
-        search.clicked.connect(self.look)
-        row.addWidget(search)
+        self.search_button = QtWidgets.QPushButton("Search")
+        self.search_button.setObjectName("primary")
+        self.search_button.clicked.connect(self.look)
+        row.addWidget(self.search_button)
+        self.near_button = QtWidgets.QPushButton("Near me")
+        self.near_button.clicked.connect(self.nearby)
+        row.addWidget(self.near_button)
         body.addLayout(row)
 
         self.listing = QtWidgets.QListWidget()
         self.listing.itemDoubleClicked.connect(lambda _item: self.use())
+        self.listing.currentRowChanged.connect(lambda _row: self.sync())
         # Choosing a masjid takes a while, and a line of small print is no way to sit through
         # it: while it works the list gives way to a timeline of what is being tried.
         self.checking = TimelineWidget(owner.p)
@@ -869,47 +882,67 @@ class MasjidPicker(QtWidgets.QDialog):
         self.pages.addWidget(self.listing)
         self.pages.addWidget(self.checking)
         body.addWidget(self.pages, 1)
-        self.trail: timeline.Timeline | None = None
 
-        self.status = QtWidgets.QLabel(
-            "Type a town or a masjid's name, then press Search.")
+        self.status = QtWidgets.QLabel(flow.WELCOME)
         self.status.setObjectName("muted")
         self.status.setWordWrap(True)
         body.addWidget(self.status)
 
         buttons = QtWidgets.QHBoxLayout()
-        self.use_button = QtWidgets.QPushButton("Use this masjid")
-        self.use_button.setObjectName("primary")
-        self.use_button.clicked.connect(self.use)
+        self.main_button = QtWidgets.QPushButton("Use this masjid")
+        self.main_button.setObjectName("primary")
+        self.main_button.clicked.connect(self.use)
         cancel = QtWidgets.QPushButton("Cancel")
         cancel.clicked.connect(self.reject)
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.clicked.connect(self.stop)
-        self.stop_button.hide()
         self.back_button = QtWidgets.QPushButton("Back to results")
         self.back_button.clicked.connect(self.back_to_list)
-        self.back_button.hide()
-        buttons.addWidget(self.use_button)
+        buttons.addWidget(self.main_button)
         buttons.addWidget(self.stop_button)
         buttons.addWidget(self.back_button)
         buttons.addWidget(cancel)
         buttons.addStretch(1)
         body.addLayout(buttons)
+        # Enter in the box searches; it must not also press whichever button a dialog picks for it
+        for button in (self.search_button, self.near_button, self.main_button, self.stop_button,
+                       self.back_button, cancel):
+            button.setAutoDefault(False)
+        self.sync()
+
+    @property
+    def busy(self) -> bool:
+        return self.mode in (flow.SEARCHING, flow.WORKING)
+
+    def sync(self) -> None:
+        """Put on show what the picker's mode calls for, and set the buttons to match."""
+        c = flow.controls(self.mode, self.listing.currentRow() >= 0)
+        self.main_button.setText(c.main)
+        self.main_button.setEnabled(c.enabled)
+        self.search_button.setEnabled(c.look)
+        self.near_button.setEnabled(c.look)
+        self.stop_button.setVisible(c.stop)
+        self.stop_button.setEnabled(c.stop and not self.stopping)
+        self.back_button.setVisible(c.back)
+        self.pages.setCurrentWidget(self.checking if c.timeline else self.listing)
+
+    def set_mode(self, mode: str) -> None:
+        self.mode = mode
+        self.sync()
 
     def back_to_list(self) -> None:
         """Show the list of masjids again, in place of the timeline."""
-        self.pages.setCurrentWidget(self.listing)
-        self.back_button.hide()
-        self.stop_button.hide()
-        if self.rows:
-            self.status.setText("Found %d. Pick one, then press Use this masjid." % len(self.rows))
+        self.pending = None
+        self.set_mode(flow.LIST)
+        self.status.setText(self.listed or flow.WELCOME)
 
     def stop(self) -> None:
         """Give up on the check that is running. It stops at the next step it takes."""
-        if self.trail is not None and self.busy:
+        if self.trail is not None and self.mode == flow.WORKING:
             self.trail.cancel()
+            self.stopping = True
             self.stop_button.setEnabled(False)
-            self.status.setText("Stopping, after the step it is on…")
+            self.status.setText(flow.STOPPING)
 
     def done(self, result: int) -> None:
         # a check still running has no one to tell any more: stop it rather than leave it
@@ -919,13 +952,24 @@ class MasjidPicker(QtWidgets.QDialog):
         self.checking.timer.stop()
         super().done(result)
 
+    def fill(self, found: list) -> None:
+        self.rows = found
+        self.pending = None
+        self.listing.clear()
+        for entry in found:
+            label = "%s\n    %s" % (entry.get("name") or "",
+                                    masjids_mod.describe(entry))
+            # A masjid with nothing to read is still pickable: the nearest one
+            # that has something can stand in for it.
+            self.listing.addItem(QtWidgets.QListWidgetItem(label))
+
     def look(self) -> None:
         text = self.box.text().strip()
         if not text or self.busy:
             return
-        self.busy = True
-        self.back_to_list()
-        self.status.setText("Searching…")
+        self.pending = None
+        self.set_mode(flow.SEARCHING)
+        self.status.setText(flow.LOOKING)
 
         def work() -> None:
             try:
@@ -938,50 +982,75 @@ class MasjidPicker(QtWidgets.QDialog):
                          daemon=True).start()
 
     def show_results(self, found, trouble: str) -> None:
-        self.busy = False
-        self.rows = found
-        self.pending = None
-        self.listing.clear()
-        for entry in found:
-            label = "%s\n    %s" % (entry.get("name") or "",
-                                    masjids_mod.describe(entry))
-            # A masjid with nothing to read is still pickable: the nearest one
-            # that has something can stand in for it.
-            self.listing.addItem(QtWidgets.QListWidgetItem(label))
-        if trouble:
-            self.status.setText("Found %d. (%s)" % (len(found), trouble))
-        elif found:
-            self.status.setText(
-                "Found %d. Pick one, then press Use this masjid." % len(found))
-        else:
-            self.status.setText("Nothing matched. Try the town, or a postal code.")
+        self.fill(found)
+        self.set_mode(flow.LIST)
+        self.listed = flow.found(len(found), trouble)
+        self.status.setText(self.listed)
 
-    def use(self) -> None:
-        index = self.listing.currentRow()
-        if index < 0 or index >= len(self.rows):
-            self.status.setText("Pick one from the list first.")
-            return
+    def nearby(self) -> None:
+        """List the masjids around this computer: ask where it is, then what lies around that."""
         if self.busy:
             return
-        if self.pending is not None and self.pending["row"] == index:
-            self.keep(self.pending["proposal"])        # the second press: they have seen it
-            return
         self.pending = None
+        self.again = self.nearby
+        self.stopping = False
+        trail = self.trail = timeline.Timeline()
+        self.checking.watch(trail)
+        self.set_mode(flow.WORKING)
+        self.status.setText(flow.LOCATING)
+
+        def work() -> None:
+            where, failure = None, ""
+            try:
+                found, trouble, where = masjids_mod.near_me(trail=trail)
+            except whereami.Unavailable as exc:
+                found, trouble, failure = [], "", str(exc)
+            except Exception as exc:            # finding where you are must never crash
+                found, trouble, failure = [], "", str(exc)[:90] or exc.__class__.__name__
+            ui.post(lambda: self.arrived(found, trouble, where, failure))
+
+        threading.Thread(target=work, name="floating-clock-masjid-near-me",
+                         daemon=True).start()
+
+    def arrived(self, found: list, trouble: str, where, failure: str) -> None:
+        self.checking.stop()
+        if where is None:                       # it could not be found out, or the person stopped it
+            self.set_mode(flow.FAILED)
+            self.status.setText(flow.unlocated(failure or trouble))
+            return
+        self.fill(found)
+        self.set_mode(flow.LIST)
+        self.listed = flow.around(len(found), where, masjids_mod.NEAR_ME_KM, trouble)
+        self.status.setText(self.listed)
+
+    def use(self) -> None:
+        """The main button: check the masjid picked; Done, once times are found; Try again, if not."""
+        c = flow.controls(self.mode, self.listing.currentRow() >= 0)
+        if c.action == flow.KEEP and self.pending is not None:
+            self.keep(self.pending)
+        elif c.action == flow.AGAIN and self.again is not None:
+            self.again()
+        elif c.action == flow.CHECK:
+            index = self.listing.currentRow()
+            if index < 0 or index >= len(self.rows):
+                self.status.setText(flow.PICK_FIRST)
+            else:
+                self.check(index)
+
+    def check(self, index: int) -> None:
+        """Prove a masjid before saving it, showing what is tried. Done keeps it, once it is found."""
         entry = self.rows[index]
         rows = list(self.rows)
         name = str(entry.get("name") or "that masjid")
-        # Prove it before saving it. Most masjid websites publish nothing the
-        # clock can read, and saving one of those would replace times that
-        # work with none at all.
-        self.busy = True
+        # Most masjid websites publish nothing the clock can read, and saving
+        # one of those would replace times that work with none at all.
+        self.pending = None
+        self.again = lambda: self.check(index)
+        self.stopping = False
         trail = self.trail = timeline.Timeline()
         self.checking.watch(trail)
-        self.pages.setCurrentWidget(self.checking)
-        self.use_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
-        self.stop_button.show()
-        self.back_button.hide()
-        self.status.setText("Checking %s. This can take a minute; Stop gives up." % name)
+        self.set_mode(flow.WORKING)
+        self.status.setText(flow.checking(name))
 
         def work() -> None:
             try:
@@ -989,26 +1058,24 @@ class MasjidPicker(QtWidgets.QDialog):
             except Exception as exc:            # a check must never crash
                 proposal = {"kind": "none", "status": "%s: %s" % (
                     name, str(exc)[:90] or exc.__class__.__name__)}
-            ui.post(lambda: self.proposed(index, proposal, trail))
+            ui.post(lambda: self.proposed(proposal, trail))
 
         threading.Thread(target=work, name="floating-clock-masjid-verify",
                          daemon=True).start()
 
-    def proposed(self, index: int, proposal: dict, trail: timeline.Timeline | None = None) -> None:
-        self.busy = False
+    def proposed(self, proposal: dict, trail: timeline.Timeline | None = None) -> None:
         kind = proposal.get("kind")
         # the timeline is closed by whatever ran the check; if that was cut short, close it here
         (trail or self.trail or timeline.Timeline()).finish(
             "none" if kind == "none" else "found", proposal.get("status") if kind == "none" else "")
         self.checking.stop()
-        self.use_button.setEnabled(True)
-        self.stop_button.hide()
-        self.back_button.show()
         if kind == "none":
+            self.set_mode(flow.FAILED)
             self.status.setText("%s  Nothing was changed." % proposal.get("status", ""))
         else:
-            # Whatever was found is shown first, and kept on a second press.
-            self.pending = {"row": index, "proposal": proposal}
+            # Whatever was found is shown first, and kept when the person presses Done.
+            self.pending = proposal
+            self.set_mode(flow.FOUND)
             self.status.setText(masjids_mod.confirmation(
                 proposal, bool(self.owner.s.get("use_24h"))))
 

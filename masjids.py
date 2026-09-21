@@ -38,7 +38,7 @@ import time
 import unicodedata
 import urllib.parse
 
-from . import mawaqit, osm, timeline
+from . import mawaqit, osm, timeline, whereami
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,11 @@ SEARCH_RADIUS_KM = 20.0
 NEIGHBOUR_KM = 25.0
 NEIGHBOURS_TRIED = 5
 NEIGHBOUR_BUDGET_S = 100.0
+# How far around this computer "near me" looks, and how many masjids it lists.
+NEAR_ME_KM = 20.0
+NEAR_ME_LIMIT = 40
+NEAR_ME_WORDS = {"busy": "Finding the masjids near you", "found": "Found the masjids near you",
+                 "none": "Nothing found near you", "stopped": "Stopped"}
 
 _directory: list | None = None
 
@@ -281,6 +286,56 @@ def search(text: str = "", lat=None, lon=None, radius_km: float = 50.0,
 
     merged = _merge(mawaqit_rows, bundled, around, osm_rows)
     return _rank(merged, text, point)[:limit], "; ".join(troubles)
+
+
+def near_me(trail=None, locate=None, search_for=None) -> tuple:
+    """(masjids, trouble, where): what lies around this computer, nearest first.
+
+    `where` is a whereami.Where, so that whoever shows the list can say how the position was
+    worked out and how far to trust it. Raises whereami.Unavailable, with why, when it could not
+    be; and gives nothing and "Stopped." when the person stopped it. Slow: run it on a worker.
+    `trail`, a timeline.Timeline, is told each step, as `propose` tells its own.
+    """
+    locate = locate or whereami.locate
+    search_for = search_for or search
+    line = trail if trail is not None else timeline.Timeline()
+    try:
+        with timeline.using(line):
+            line.plan("masjids near you", [
+                timeline.Section("where", "Where you are", "", ("locate", "internet")),
+                timeline.Section("near", "The masjids around it", "within %d km" % NEAR_ME_KM, ("search",)),
+            ], words=NEAR_ME_WORDS)
+            with line.section("where") as source:
+                try:
+                    where = locate()
+                except whereami.Unavailable:
+                    source.fail("could not be worked out")      # each try says why, one line each
+                    raise
+                source.ok(whereami.describe(where))
+            with line.section("near") as source:
+                with line.step("search") as step:
+                    try:
+                        found, trouble = search_for("", lat=where.latitude, lon=where.longitude,
+                                                    radius_km=NEAR_ME_KM, limit=NEAR_ME_LIMIT)
+                    except Exception as exc:                # a search must never crash
+                        found, trouble = [], str(exc)[:90] or exc.__class__.__name__
+                        step.fail(trouble)
+                    else:
+                        step.ok("%d found" % len(found) if found else "none found")
+                source.ok("%d masjid%s" % (len(found), "" if len(found) == 1 else "s") if found else "nothing")
+            line.check()                                    # Stop, pressed while it searched, is heard now
+    except timeline.Cancelled:
+        line.finish("stopped", "Stopped.")
+        return [], "Stopped.", None
+    except whereami.Unavailable as exc:
+        line.say("none", "Could not find where you are")
+        line.finish("none", str(exc)[:90], open="where")         # left open, for what each try said
+        raise
+    except Exception as exc:
+        line.finish("none", str(exc)[:90] or exc.__class__.__name__)
+        raise
+    line.finish("found" if found else "none", "" if found else "nothing within %d km" % NEAR_ME_KM)
+    return found, trouble, where
 
 
 def _rank(rows: list, text: str, point) -> list:
@@ -710,18 +765,18 @@ def confirmation(proposal: dict, use_24h: bool = False) -> str:
         source = {"mawaqit": "mawaqit.net", "prayersconnect": "PrayersConnect"}.get(
             proposal.get("source"), "its published timetable")
         return ("%s's times, from %s: %s.%s  Check they match what the masjid announces -- a listing "
-                "can be out of date. Press Use this masjid again to keep them." % (name, source, times, note))
+                "can be out of date. Press Done to use them." % (name, source, times, note))
     if proposal.get("kind") == "proxy":
         km = proposal.get("km")
         return ("%s publishes no times the clock can read. The nearest masjid that does is %s%s: "
                 "%s.  These are %s's times, not %s's, and may differ from what %s announces. "
-                "Press Use this masjid again to keep them.%s" % (
+                "Press Done to use them.%s" % (
                     proposal.get("asked") or "That masjid", name,
                     " (%.1f km away)" % km if km else "", times, name,
                     proposal.get("asked") or "it", proposal.get("asked") or "it", note))
     return ("Read from %s's web page: %s.%s  A page can be out of date or laid out in a way "
-            "that fools a reader, so check these against the masjid. Press Use this masjid "
-            "again to keep them." % (name, times, note))
+            "that fools a reader, so check these against the masjid. Press Done to use "
+            "them." % (name, times, note))
 
 
 def apply(settings: dict, proposal: dict) -> None:

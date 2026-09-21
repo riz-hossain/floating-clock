@@ -45,9 +45,17 @@ STEPS = {
     "browser":  ("Opening the pages in a browser", 25.0),
     "ask":      ("Asking mawaqit.net for its timetable", 6.0),
     "check":    ("Checking the times make sense", 1.0),
+    # finding where this computer is, and the masjids around it (masjids.near_me)
+    "locate":   ("Asking this computer where it is", 8.0),
+    "internet": ("Working it out from your internet address", 4.0),
+    "search":   ("Looking for masjids around that point", 12.0),
 }
 WEBSITE = ("reach", "feed", "embed", "calendar", "home", "pages", "browser", "check")
 MAWAQIT = ("ask", "check")
+
+# What a timeline says at its head, by how it is going. "%s" is what it is about; a check of one
+# masjid is the usual one, and finding the masjids near you says its own (see Timeline.plan).
+CHECK_WORDS = {"busy": "Checking %s", "found": "Times found", "none": "Nothing readable", "stopped": "Stopped"}
 
 # What trying one neighbouring masjid is worth on the bar, in the same seconds.
 ATTEMPT_SECONDS = 10.0
@@ -211,16 +219,22 @@ class Timeline:
         self._attempt: _Row | None = None        # the neighbour being tried, inside it
         self._cancelled = threading.Event()
         self.title = ""
+        self.words = dict(CHECK_WORDS)
         self.started = clock()
         self.ended: float | None = None
         self.outcome = ""                        # "" while it runs, then found | none | stopped
         self.summary = ""
 
     # the plan
-    def plan(self, title: str, sections) -> None:
-        """Lay out what is going to be tried, so the whole of it is visible from the start."""
+    def plan(self, title: str, sections, words: dict | None = None) -> None:
+        """Lay out what is going to be tried, so the whole of it is visible from the start.
+
+        `words` says what to put at the head of it, as CHECK_WORDS does for a check of one masjid.
+        """
         with self._lock:
             self.title = title
+            if words:
+                self.words = dict(CHECK_WORDS, **words)
             for spec in sections:
                 section = _Row(spec.key, "section", spec.label, 0, sub=spec.sub)
                 self._rows.append(section)
@@ -235,6 +249,11 @@ class Timeline:
                                expected=ATTEMPT_SECONDS)
                     self._rows.append(row)
                     self._steps[(spec.key, key)] = row
+
+    def say(self, outcome: str, text: str) -> None:
+        """Change what is said at the head of it for one outcome, once it is known how it went."""
+        with self._lock:
+            self.words[outcome] = text
 
     # stopping
     def cancel(self) -> None:
@@ -424,7 +443,7 @@ class Timeline:
                 })
             end = self.ended if self.ended is not None else now
             return {
-                "title": self.title, "busy": not self.outcome, "outcome": self.outcome,
+                "title": self.title, "words": dict(self.words), "busy": not self.outcome, "outcome": self.outcome,
                 "summary": self.summary, "elapsed": max(0.0, end - self.started),
                 "fraction": self._fraction(now), "rows": rows,
                 "now": ("%s %s" % (running.label, running.detail)).strip() if running else "",
@@ -456,7 +475,10 @@ class Timeline:
 class _Idle(Timeline):
     """The timeline nobody is watching: everything is accepted and nothing is kept."""
 
-    def plan(self, title, sections) -> None:
+    def plan(self, title, sections, words=None) -> None:
+        pass
+
+    def say(self, outcome, text) -> None:
         pass
 
     def cancel(self) -> None:
