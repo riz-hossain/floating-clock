@@ -36,8 +36,9 @@ import re
 import sys
 import time
 import unicodedata
+import urllib.parse
 
-from . import mawaqit, osm
+from . import mawaqit, osm, timeline
 
 log = logging.getLogger(__name__)
 
@@ -485,7 +486,63 @@ def differing(first: list, second: list, tolerance: int = 10) -> list:
             if name in a and name in b and abs(_minutes_of(a[name]) - _minutes_of(b[name])) > tolerance]
 
 
-def propose(entry: dict, rows: list, progress=None, clock=time.time) -> dict:
+def _none(name: str, why: str) -> dict:
+    """The proposal that says nothing was found, and why."""
+    return {"kind": "none", "address": "", "name": name, "times": [], "status": why,
+            "how": "", "source": "", "asked": "", "km": None, "latitude": None, "longitude": None}
+
+
+def _reason(status: str) -> str:
+    """A status sentence without its "could not read" lead-in, for one line of the timeline."""
+    return str(status or "").replace("Could not read the prayer times: ", "").strip()
+
+
+def _host(address: str) -> str:
+    """"example.org" for "https://www.example.org/prayer"."""
+    host = urllib.parse.urlsplit(str(address or "")).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _key_of(address: str) -> str:
+    """Which planned source an address is: the mawaqit.net listing or the masjid's own site."""
+    return "mawaqit" if mawaqit.looks_like(address) else "site"
+
+
+# How a reading off a page was made, in words for the timeline.
+_HOW = {"labelled": "the columns are labelled", "headed": "under an iqama heading",
+        "guessed": "worked out from the layout, so less certain"}
+
+
+def _came_from(got: dict) -> str:
+    """What to say of a source that gave times."""
+    if got["source"] == "scrape":
+        return "read the times off the page (%s)" % _HOW.get(got["how"], "read as a table")
+    if got["source"] == "prayersconnect":
+        return "has a timetable on PrayersConnect"
+    if got["source"] == "mawaqit":
+        return "has its timetable"
+    return "has a published timetable"
+
+
+def _plan(addresses: list, neighbours: list) -> list:
+    """What is going to be tried for a masjid, in order, for the timeline to lay out."""
+    sections = []
+    for address in addresses:
+        if _key_of(address) == "mawaqit":
+            sections.append(timeline.Section("mawaqit", "mawaqit.net", "", timeline.MAWAQIT))
+        else:
+            sections.append(timeline.Section("site", "The masjid's own website", _host(address),
+                                             timeline.WEBSITE))
+    if neighbours:
+        sections.append(timeline.Section(
+            "nearby", "Nearby masjids", "only if this one has nothing",
+            attempts=tuple(("n%d" % index, str(other.get("name") or "a nearby masjid"),
+                            "%.1f km away" % (other.get("km") or 0.0))
+                           for index, other in enumerate(neighbours))))
+    return sections
+
+
+def propose(entry: dict, rows: list, progress=None, clock=time.time, trail=None) -> dict:
     """What to offer for this choice. Slow: run it on a worker.
 
     {"kind": "exact" | "read" | "proxy" | "none", "address", "name", "times",
@@ -499,50 +556,88 @@ def propose(entry: dict, rows: list, progress=None, clock=time.time) -> dict:
     "none"   nothing was found, and `status` says why.
 
     `rows` is the list the person was choosing from, which is where the
-    neighbours come from. `progress(text)` is told what is being tried.
+    neighbours come from. `progress(text)` is told what is being tried. `trail`,
+    a timeline.Timeline, is told every step as it happens, for a window that draws
+    them and offers Stop; what is read is the same with or without one.
     """
-    say = progress or (lambda _text: None)
+    line = trail if trail is not None else timeline.Timeline()
+    name = str(entry.get("name") or "that masjid")
+    try:
+        with timeline.using(line):
+            found, supplier = _propose(entry, rows, progress or (lambda _text: None), clock, line)
+    except timeline.Cancelled:
+        line.finish("stopped", "Stopped.")
+        return _none(name, "Stopped.")
+    except Exception as exc:
+        line.finish("none", str(exc)[:90] or exc.__class__.__name__)
+        raise
+    if found["kind"] == "none":
+        line.finish("none", found["status"])
+    else:
+        line.finish("found", "", open=supplier)
+    return found
+
+
+def _propose(entry: dict, rows: list, say, clock, line) -> tuple:
+    """propose() less the bookkeeping: (the proposal, which planned source supplied it)."""
     name = str(entry.get("name") or "that masjid")
     spot = where_of(entry)
     zone = zone_problem(entry)
     if zone:
-        return {"kind": "none", "address": "", "name": name, "times": [], "status": zone + ".",
-                "how": "", "source": "", "asked": "", "km": None, "latitude": None, "longitude": None}
+        return _none(name, zone + "."), ""
     reasons: list[str] = []
     addresses = addresses_for(entry)
+    neighbours = _neighbours(entry, rows)[:NEIGHBOURS_TRIED]
+    line.plan(name, _plan(addresses, neighbours))
     for address in addresses:
         say("Checking %s…" % name)
-        got = inspect(address, spot)
+        key = _key_of(address)
+        with line.section(key) as source:
+            got = inspect(address, spot)
+            if got["prayers"]:
+                source.ok(_came_from(got))
+            else:
+                source.fail(_reason(got["status"]))
         if got["prayers"]:
             found = _proposal(entry, address, got, "exact" if got["exact"] else "read")
+            supplier = key
             if got["source"] == "mawaqit":
-                _cross_check(found, entry, [a for a in addresses if a != address], spot, say)
-            return found
+                supplier = _cross_check(found, entry, [a for a in addresses if a != address],
+                                        spot, say, line)
+            return found, supplier
         reasons.append(got["status"].replace("Could not read the prayer times: ", ""))
 
     started = clock()
-    for other in _neighbours(entry, rows)[:NEIGHBOURS_TRIED]:
-        if clock() - started > NEIGHBOUR_BUDGET_S:
-            break
-        say("Nothing readable for %s. Trying %s, %.1f km away…" % (
-            name, other.get("name") or "the next masjid", other.get("km") or 0.0))
-        for address in addresses_for(other):
-            got = inspect(address, where_of(other))
-            if got["prayers"]:
-                found = _proposal(other, address, got, "proxy")
-                found["asked"] = name
-                return found
+    with line.section("nearby", "trying up to %d within %d km" % (len(neighbours), NEIGHBOUR_KM)) as group:
+        for index, other in enumerate(neighbours):
+            if clock() - started > NEIGHBOUR_BUDGET_S:
+                group.fail("ran out of time")
+                break
+            say("Nothing readable for %s. Trying %s, %.1f km away…" % (
+                name, other.get("name") or "the next masjid", other.get("km") or 0.0))
+            with line.attempt("n%d" % index) as attempt:
+                why = ""
+                for address in addresses_for(other):
+                    got = inspect(address, where_of(other))
+                    if got["prayers"]:
+                        found = _proposal(other, address, got, "proxy")
+                        found["asked"] = name
+                        attempt.ok("has times the clock can read")
+                        group.ok("using %s's times" % (other.get("name") or "the next masjid"))
+                        return found, "nearby"
+                    why = _reason(got["status"])
+                attempt.fail(why or "nothing the clock can read")
+        group.fail("none of them has times the clock can read")
 
     if not addresses_for(entry):
         why = "%s has no website on record, and no masjid near it has times the clock can read." % name
     else:
         why = "%s: %s" % (name, reasons[0] if reasons else "nothing the clock can read")
         why += " Nor did the masjids around it."
-    return {"kind": "none", "address": "", "name": name, "times": [], "status": why,
-            "how": "", "source": "", "asked": "", "km": None, "latitude": None, "longitude": None}
+    return _none(name, why), ""
 
 
-def _cross_check(found: dict, entry: dict, others: list, spot, say) -> None:
+def _cross_check(found: dict, entry: dict, others: list, spot, say, line=None) -> str:
     """Compare a mawaqit.net listing with what the masjid's own website says.
 
     They are two people's records of one thing, and they part company more than
@@ -550,22 +645,35 @@ def _cross_check(found: dict, entry: dict, others: list, spot, say) -> None:
     entered, is exact about what it holds and wrong about today. Where they
     disagree and the page reads with some certainty, it is the masjid speaking
     for itself and it is what is offered; the listing is named as the dissenter.
+
+    Returns which source the proposal now rests on: "mawaqit", or "site" when the
+    page was the one believed.
     """
+    line = line or timeline.current()
     for address in others:
         say("Comparing with %s's own website…" % (entry.get("name") or "the masjid"))
-        page = inspect(address, spot)
-        if not page["prayers"] or page["source"] != "scrape":
-            continue
-        apart = differing(found["times"], page["times"])
-        if not apart:
-            return
-        if page["how"] in ("labelled", "headed"):
-            listing = found["times"]
-            found.update(_proposal(entry, address, page, "read"))
-            found["disagrees"] = {"who": "mawaqit.net", "times": listing, "prayers": apart}
-        else:
+        with line.section("site", "comparing with mawaqit.net") as source:
+            page = inspect(address, spot)
+            if not page["prayers"]:
+                source.fail(_reason(page["status"]))
+                continue
+            if page["source"] != "scrape":
+                source.skip("it is not a page the clock reads")
+                continue
+            apart = differing(found["times"], page["times"])
+            if not apart:
+                source.ok("agrees with mawaqit.net")
+                return "mawaqit"
+            if page["how"] in ("labelled", "headed"):
+                listing = found["times"]
+                found.update(_proposal(entry, address, page, "read"))
+                found["disagrees"] = {"who": "mawaqit.net", "times": listing, "prayers": apart}
+                source.ok("differs on %s: the page is what is offered" % ", ".join(apart))
+                return "site"
             found["disagrees"] = {"who": "the masjid's own website", "times": page["times"], "prayers": apart}
-        return
+            source.ok("differs on %s, but the page is only a guess" % ", ".join(apart))
+            return "mawaqit"
+    return "mawaqit"
 
 
 def clock_text(times: list, use_24h: bool = False) -> str:

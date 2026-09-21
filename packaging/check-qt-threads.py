@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["FLOATING_CLOCK_HOME"] = tempfile.mkdtemp(prefix="floating-clock-check-")
 
-from PySide6 import QtWidgets  # noqa: E402
+from PySide6 import QtGui, QtWidgets  # noqa: E402
 
 from floating_clock import masjids, prayer  # noqa: E402
 from floating_clock.qt.clock import QtClock  # noqa: E402
@@ -54,6 +54,7 @@ def spin(seconds: float, until) -> bool:
     return bool(until())
 
 
+real_propose = masjids.propose
 soon = datetime.now() + timedelta(hours=1)
 FOUND = ([prayer.Prayer("Fajr", soon)], "Test Masjid · updated just now")
 prayer.load = lambda base, url="", now=None, force=False, fetcher=None, **kw: FOUND
@@ -162,6 +163,157 @@ dialog.prayer_url.setText("http://elsewhere.example")
 dialog._set_prayer_url()
 check("forgets where the masjid was, and that it was borrowed",
       clock.s["prayer_lat"] is None and clock.s["prayer_proxy_for"] == "" and clock.s["prayer_masjid_name"] == "")
+
+print("the timeline of a check")
+import threading  # noqa: E402
+
+from floating_clock import timeline  # noqa: E402
+
+masjids.propose = real_propose                      # the real one, which reports each step
+
+
+def five():
+    day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return [prayer.Prayer(n, day + timedelta(hours=h, minutes=m))
+            for n, (h, m) in zip(prayer.DAILY, ((6, 15), (13, 45), (17, 45), (19, 28), (21, 0)))]
+
+
+gate = threading.Event()
+entered = threading.Event()
+finished = threading.Event()
+
+
+def slow_inspect(address, where=None):
+    """A read that takes as long as it is let to, and hears Stop."""
+    line = timeline.current()
+    try:
+        with line.step("ask") as step:
+            entered.set()
+            while not gate.is_set():
+                time.sleep(0.02)
+                line.check()
+            step.ok("received its timetable")
+        prayers = five()
+        return {"prayers": prayers, "status": "ok", "source": "mawaqit", "how": "", "exact": True,
+                "times": masjids._day_times(prayers)}
+    finally:
+        finished.set()
+
+
+def begin():
+    gate.clear()
+    entered.clear()
+    finished.clear()
+    picker = MasjidPicker(dialog)
+    picker.box.setText("waterloo")
+    picker.look()
+    spin(10, lambda: picker.listing.count() > 0)
+    picker.listing.setCurrentRow(0)
+    picker.use()
+    return picker
+
+
+real_inspect = masjids.inspect
+masjids.inspect = slow_inspect
+kept = clock.s["prayer_ics_url"]
+picker = begin()
+check("choosing a masjid swaps the list for a timeline of what is being done",
+      picker.pages.currentWidget() is picker.checking)
+check("with Stop to give up, and the button that would start another check out of the way",
+      not picker.stop_button.isHidden() and picker.back_button.isHidden() and not picker.use_button.isEnabled())
+check("the worker gets as far as its first step", spin(5, entered.is_set))
+spin(0.4, lambda: False)
+snap = picker.trail.snapshot()
+check("the timeline is running and says what", snap["busy"] and any(r["state"] == "running" for r in snap["rows"]), str(snap["rows"]))
+check("and the window is drawing it, with a spinner on what is running",
+      any(i["op"] == "icon" and i["state"] == "running" for i in picker.checking.canvas.drawn["items"]))
+check("and a bar that has begun to move", any(i["op"] == "bar" and i["fraction"] > 0 for i in picker.checking.canvas.drawn["items"]))
+check("the status line says that it takes a while and that Stop gives up", "Stop" in picker.status.text(), picker.status.text())
+gate.set()
+check("when it is done, what it found is shown as before",
+      spin(10, lambda: "Check they match" in picker.status.text()), picker.status.text())
+check("Stop goes, and Back to results comes, and the button works again",
+      picker.stop_button.isHidden() and not picker.back_button.isHidden() and picker.use_button.isEnabled())
+check("the timeline says it found something", picker.trail.snapshot()["outcome"] == "found")
+check("and the window stops turning its spinner", not picker.checking.timer.isActive())
+check("and nothing has been saved yet", clock.s["prayer_ics_url"] == kept)
+picker.back_to_list()
+check("Back to results shows the list again", picker.pages.currentWidget() is picker.listing and picker.back_button.isHidden())
+picker.look()                    # a fresh search clears the pending proposal, so that Use starts a check again
+spin(10, lambda: not picker.busy and picker.listing.count() > 0)
+picker.listing.setCurrentRow(0)
+picker.use()
+spin(10, lambda: "Check they match" in picker.status.text())
+check("with a finished check on show", picker.pages.currentWidget() is picker.checking)
+picker.look()
+check("a new search brings the list back, and takes Back to results away",
+      picker.pages.currentWidget() is picker.listing and picker.back_button.isHidden(), picker.status.text())
+spin(10, lambda: not picker.busy)
+
+print("Stop")
+picker = begin()
+check("a check is under way", spin(5, entered.is_set))
+picker.stop()
+check("Stop is heard by the worker in the middle of a step", spin(10, finished.is_set))
+check("and reported: stopped, and nothing changed",
+      spin(10, lambda: "Stopped" in picker.status.text() and "Nothing was changed" in picker.status.text()), picker.status.text())
+check("the timeline says it was stopped", picker.trail.snapshot()["outcome"] == "stopped", str(picker.trail.snapshot()["outcome"]))
+check("what was running is not left spinning", all(r["state"] != "running" for r in picker.trail.snapshot()["rows"]))
+check("nothing was saved", clock.s["prayer_ics_url"] == kept and picker.result() != picker.DialogCode.Accepted)
+check("Back to results is offered, and the dialog stays open", not picker.back_button.isHidden() and picker.use_button.isEnabled())
+
+print("closing the window in the middle of a check")
+picker = begin()
+check("a check is under way", spin(5, entered.is_set))
+picker.reject()
+check("closing the window stops it, so it does not go on opening pages for nobody", spin(10, finished.is_set))
+check("and the timeline says so", spin(5, lambda: picker.trail.snapshot()["outcome"] == "stopped"), str(picker.trail.snapshot()["outcome"]))
+masjids.inspect = real_inspect
+
+print("a check that is not the real one")
+masjids.propose = lambda entry, rows, progress=None, **k: {"kind": "none", "status": "Erin Centre: nothing readable."}
+picker = MasjidPicker(dialog)
+picker.box.setText("waterloo")
+picker.look()
+spin(10, lambda: picker.listing.count() > 0)
+picker.listing.setCurrentRow(0)
+picker.use()
+check("a worker that never reports still leaves a timeline that ends", spin(10, lambda: not picker.busy)
+      and picker.trail.snapshot()["outcome"] == "none" and not picker.trail.snapshot()["busy"])
+masjids.propose = real_propose
+
+print("the picture, at other sizes")
+from floating_clock import palette as pal  # noqa: E402
+from floating_clock.qt.timelinewidget import TimelineWidget  # noqa: E402
+
+wide = timeline.Timeline()
+wide.plan("Test Masjid", [timeline.Section("site", "The masjid's own website", "example.org", timeline.WEBSITE)])
+wide.section("site")
+wide.start("pages", "reading /prayer-times, /salah-timings and 2 more")
+p = pal.resolve("dark", (127, 40, 255))
+heights = {}
+for width in (260, 420, 700):
+    view = TimelineWidget(p)
+    view.resize(width, 300)
+    view.watch(wide)
+    app.processEvents()
+    view.tick()
+    heights[width] = view.canvas.drawn["height"]
+    view.timer.stop()
+    # an independent ruler: the layout's own measure is what is being checked, so it cannot judge itself
+    over = [i for i in view.canvas.drawn["items"] if i["op"] == "text" and i["anchor"] == "w"
+            and i["x"] + QtGui.QFontMetrics(view.font_for(i["bold"], i["small"])).horizontalAdvance(i["text"]) > width]
+    check("at %d pixels nothing runs off the edge, measured with the real fonts" % width, not over, str(over[:1]))
+check("a narrower window is taller, not cut off", heights[260] > heights[700], str(heights))
+for mode in ("dark", "light"):
+    view = TimelineWidget(pal.resolve(mode, (127, 40, 255)))
+    view.resize(500, 300)
+    view.watch(wide)
+    app.processEvents()
+    view.timer.stop()
+    image = view.grab().toImage()
+    check("it paints in %s mode, and the picture is not blank" % mode,
+          image.width() > 0 and len({image.pixel(x, y) for x in range(0, image.width(), 9) for y in range(0, image.height(), 9)}) > 6)
 
 print()
 if failures:
