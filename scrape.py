@@ -375,6 +375,11 @@ def _headers(tokens, lines, first) -> list:
     that Waterloo Masjid Iqamah appears in your calendars" -- is not one, and
     counting it made the first time in every row look like the iqama. An
     instruction ("For Current Iqama Times Select ...") is not one either.
+
+    Without bars to show the cells, "Start Azan Iqamah" on one line looks like
+    "Athan Adhan": one heading said twice. It is the row underneath that says
+    which. A row of three times is three columns, so it is read as three; a row
+    of two is two, and the two are still read as one.
     """
     name = tokens[first]
     run = []
@@ -393,7 +398,22 @@ def _headers(tokens, lines, first) -> list:
         if not same_cell:
             out.append(t.value)
         previous = t
+    columns = [t.value for t in run]
+    if len(columns) != len(out) and _times_in_row(tokens, first) == len(columns):
+        return columns             # some were taken for one heading said twice, but the row has a time each
     return out
+
+
+def _times_in_row(tokens, first) -> int:
+    """How many times stand on the same line as the prayer name at tokens[first], after it."""
+    line = tokens[first].line
+    count = 0
+    for t in tokens[first + 1:]:
+        if t.line != line:
+            break
+        if t.kind == "time":
+            count += 1
+    return count
 
 
 def _round_times(times) -> int:

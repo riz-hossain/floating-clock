@@ -139,6 +139,50 @@ found = read(sunset_row)
 check("a Sunset row among the five is not one of them", times(found) == "06:15 13:35 18:15 19:22 21:15",
       times(found))
 
+# A heading on one line, with nothing to show where one cell ends, is the way a script-drawn table
+# comes out -- Ajax's does: "Salah Start Azan Iqamah" over "Fajr 5:44 am 06:00 AM 06:15 AM".
+# "Start Azan" looks like one heading said twice, and it is the row that says it is two.
+ROWS3 = (("Fajr", "5:44 am", "06:00 AM", "06:15 AM"), ("Sunrise", "7:02 am"), ("Zuhr", "1:11 pm", "01:45 PM", "02:00 PM"),
+         ("Asr", "5:27 pm", "05:45 PM", "06:00 PM"), ("Maghrib", "7:15 PM", "07:16 PM", "07:18 PM"),
+         ("Isha", "8:37 pm", "09:14 PM", "09:15 PM"))
+ROWS2 = tuple((r[0], r[1], r[-1]) if len(r) > 2 else r for r in ROWS3)
+
+
+AJAX = (43.85, -79.03, -4)          # these are Ajax's times for Monday the 21st, and the sun check knows it
+
+
+def read_ajax(html: str):
+    return read(html, date(2026, 9, 21), AJAX)
+
+
+def by_line(head: str, rows) -> str:
+    return page("<p>%s</p>" % head + "".join("<p>%s</p>" % " ".join(r) for r in rows))
+
+
+check("a one-line heading of three columns over rows of three times is read as three",
+      times(read_ajax(by_line("Salah Start Azan Iqamah", ROWS3))) == "06:15 14:00 18:00 19:18 21:15",
+      times(read_ajax(by_line("Salah Start Azan Iqamah", ROWS3))))
+check("and the third is the iqama, the second the call to prayer", (read_ajax(by_line("Salah Start Azan Iqamah", ROWS3)) or {}).get("how") == "headed")
+check("whichever way 'azan' is spelt", all(times(read_ajax(by_line("Salah Start %s Iqamah" % word, ROWS3))) == "06:15 14:00 18:00 19:18 21:15"
+                                           for word in ("Azan", "Adhan", "Athan", "Azaan")))
+check("or the iqama", times(read_ajax(by_line("Salah Begins Adhan Iqama", ROWS3))) == "06:15 14:00 18:00 19:18 21:15")
+check("in twenty-four-hour time too", times(read_ajax(by_line("Salah Start Azan Iqamah", (
+    ("Fajr", "05:44", "06:00", "06:15"), ("Sunrise", "07:02"), ("Zuhr", "13:11", "13:45", "14:00"),
+    ("Asr", "17:27", "17:45", "18:00"), ("Maghrib", "19:15", "19:16", "19:18"),
+    ("Isha", "20:37", "21:14", "21:15"))))) == "06:15 14:00 18:00 19:18 21:15")
+check("and when the block is on the page twice, as a desktop and a phone copy", times(read_ajax(page(
+    "".join("<p>%s</p>" % l for l in (["Salah Start Azan Iqamah"] + [" ".join(r) for r in ROWS3]) * 2)))) == "06:15 14:00 18:00 19:18 21:15")
+check("rows of two times under the same heading are still two columns, the pair taken as one heading",
+      times(read_ajax(by_line("Salah Start Azan Iqamah", ROWS2))) == "06:15 14:00 18:00 19:18 21:15",
+      times(read_ajax(by_line("Salah Start Azan Iqamah", ROWS2))))
+check("as they were when the heading is 'Athan / Adhan' and the row has two",
+      times(read_ajax(by_line("Salah Athan / Adhan Iqamah", ROWS2))) == "06:15 14:00 18:00 19:18 21:15")
+check("three times under a heading that names none of them are still not guessed at",
+      read_ajax(by_line("Prayer Times", ROWS3)) is None)
+check("nor three with no heading at all", read_ajax(page("".join("<p>%s</p>" % " ".join(r) for r in ROWS3))) is None)
+check("and a row whose count fits neither reading is refused, not bent to fit",
+      read_ajax(by_line("Salah Start Azan Iqamah", (("Fajr", "5:44 am", "06:00 AM", "06:10 AM", "06:15 AM"),) + ROWS3[1:])) is None)
+
 # --- which day the times are for -------------------------------------------------------
 print("which day the times are for")
 
