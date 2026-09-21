@@ -11,6 +11,8 @@ what was found to the file, so it stays fixed.
       share a page
     * the corrections in directory-overrides.json are well formed, and none of
       the mistakes they correct is in the shipped file
+    * the audit notices a page that is somewhere else -- another state, another
+      province's postal codes -- however well the name matches
     * make-directory.py applies them: the right address goes in, a cleared
       website leaves the masjid on the map, a school is dropped, a correction
       meant for an old mistake does not overrule a research file that has since
@@ -241,6 +243,57 @@ with tempfile.TemporaryDirectory(prefix="floating-clock-directory-") as folder:
         except ValueError:
             check("refuses a correction with " + what, True)
     check("no corrections file is no corrections", maker.load_overrides(folder / "absent.json") == [])
+
+# --- the audit: a page that is somewhere else ----------------------------------------------------
+print("the audit notices a page that is somewhere else")
+audit = load_script("audit-directory-websites")
+
+
+def judged(entry: dict, html: str, research: dict | None = None, url: str = "https://masjid.example/") -> dict:
+    got = {"final": url, "status": 200, "insecure": False, "html": html, "error": "", "type": "text/html", "alt": None}
+    key = (entry["name"].strip().lower(), round(entry["latitude"], 4), round(entry["longitude"], 4))
+    return audit.judge(dict(entry, website=url), {key: research} if research else {}, got, {audit.fold(entry["city"])})
+
+
+def site(title: str, body: str) -> str:
+    return "<html><head><title>%s</title></head><body><h1>%s</h1><p>%s</p></body></html>" % (title, title, body)
+
+
+RICHMOND_HILL = {"name": "Richmond Hill Islamic Centre", "city": "Richmond Hill", "province": "Ontario",
+                 "latitude": 43.85, "longitude": -79.43}
+FAROOQ = {"name": "Masjid Al Farooq", "city": "Mississauga", "province": "Ontario", "latitude": 43.6, "longitude": -79.7}
+
+new_york = judged(RICHMOND_HILL, site("Richmond Hill Islamic Centre",
+                                      "Address: 125-09 Jamaica Avenue, Richmond Hill, NY 11418. Phone: (718) 847-0000"))
+check("a masjid's own town in another state is not its place, however well the name matches",
+      new_york["verdict"] == "WRONG PLACE?" and any("'Richmond Hill, NY'" in why for why in new_york["why"]), str(new_york))
+right = judged(RICHMOND_HILL, site("Richmond Hill Islamic Centre", "Address: 1 Fieldstone Dr, Richmond Hill, ON L4S 2A4."))
+check("and the same town in the right province is", right["verdict"] == "OK", "%s %s" % (right["verdict"], right["why"]))
+
+edmonton = judged(FAROOQ, site("Masjid Al Farooq", "Serving Mississauga and beyond. Our address: 345 Woodvale Rd W, Edmonton, AB T6L 3Z7."))
+check("another province's postal code, on a page that names the town in passing, is not this masjid's",
+      edmonton["verdict"] == "WRONG PLACE?" and any("postal code of Alberta (T6L 3Z7)" in why for why in edmonton["why"]), str(edmonton))
+check("and says whose it looks like", any("this masjid is in Ontario" in why for why in edmonton["why"]))
+
+branch = judged(RICHMOND_HILL, site("Richmond Hill Islamic Centre",
+                                    "1 Fieldstone Dr, Richmond Hill, ON L4S 2A4. Our sister masjid: 12 First St, Calgary, AB T2P 1J9."),
+                research={"address": "1 Fieldstone Dr, Richmond Hill, ON L4S 2A4"})
+check("but a page that prints the masjid's own address as well is a sister masjid, for a person to look at",
+      branch["verdict"] == "CHECK" and any("Alberta" in why for why in branch["why"]), "%s %s" % (branch["verdict"], branch["why"]))
+
+alberta = judged({"name": "Markaz Ul Islam", "city": "Edmonton", "province": "Alberta", "latitude": 53.5, "longitude": -113.5},
+                 site("Markaz Ul Islam", "Serving Edmonton. 5315 Rue Lessard NW, Edmonton, AB T6S 1A7."))
+check("a masjid in Alberta printing Alberta's postal code is not accused", alberta["verdict"] == "OK", "%s %s" % (alberta["verdict"], alberta["why"]))
+
+check("what a page says is read as it is written: 'ny' in ordinary text is not a state",
+      audit.elsewhere(RICHMOND_HILL, "Richmond Hill, ny is where it began, they say") == [])
+check("nor is a postal-code-shaped word from another country", audit.elsewhere(RICHMOND_HILL, "Zip 11418 and W1A 1AA") == [])
+check("a masjid whose province is not known is not accused of anything", audit.elsewhere({"city": "Richmond Hill"}, "Richmond Hill, NY T6L 3Z7") == [])
+check("every first letter of a postal code that Canada uses belongs to a province",
+      set(audit.POSTAL_PROVINCE) == set("ABCEGHJKLMNPRSTVXY") and set(audit.POSTAL_PROVINCE.values()) >= {"Ontario", "Alberta", "Quebec"})
+check("and every province the directory holds has a code to compare with",
+      all(audit.PROVINCE_CODE.get(m.get("province")) for m in json.load(io.open(DIRECTORY, encoding="utf-8"))["masjids"]),
+      str({m.get("province") for m in json.load(io.open(DIRECTORY, encoding="utf-8"))["masjids"] if not audit.PROVINCE_CODE.get(m.get("province"))}))
 
 print()
 if failures:

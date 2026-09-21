@@ -13,7 +13,10 @@ look -- and saying who is asking) and asks two questions of the page it lands on
 
     is this the masjid?   distinctive words of its name in the title, a heading,
                           the site name or the host name; or in the text
-    is it the place?      its city, street address, postal code, telephone
+    is it the place?      its city, street address, postal code, telephone --
+                          and nothing that says it is somewhere else: the town
+                          in another state or province, another province's
+                          postal codes
                           number or e-mail domain on the page
 
 A page that answers both is fine, unless it is not quite the page that was
@@ -81,6 +84,20 @@ PARKED = ("domain is for sale", "this domain", "buy this domain", "parked", "com
 SELECTOR = re.compile(r"\b(select|choose|pick) (your|a|the) (centre|center|masjid|mosque|location|branch|chapter)"
                       r"|\bour (centres|centers|masjids|mosques|locations)\b|\bfind (a|your) (centre|center|masjid|mosque)",
                       re.I)
+# A Canadian postal code begins with a letter that belongs to one province. A page that prints
+# another province's is somewhere else -- and so is one that puts the masjid's own town in another
+# state, which matching the town's name will never notice: Richmond Hill, Ontario and Richmond Hill,
+# New York have the same name and the same sort of mosque.
+POSTAL_PROVINCE = {"A": "Newfoundland and Labrador", "B": "Nova Scotia", "C": "Prince Edward Island",
+                   "E": "New Brunswick", "G": "Quebec", "H": "Quebec", "J": "Quebec", "K": "Ontario",
+                   "L": "Ontario", "M": "Ontario", "N": "Ontario", "P": "Ontario", "R": "Manitoba",
+                   "S": "Saskatchewan", "T": "Alberta", "V": "British Columbia",
+                   "X": "Northwest Territories", "Y": "Yukon"}
+PROVINCE_CODE = {"Newfoundland and Labrador": "NL", "Nova Scotia": "NS", "Prince Edward Island": "PE",
+                 "New Brunswick": "NB", "Quebec": "QC", "Ontario": "ON", "Manitoba": "MB",
+                 "Saskatchewan": "SK", "Alberta": "AB", "British Columbia": "BC",
+                 "Northwest Territories": "NT", "Yukon": "YT", "Nunavut": "NU"}
+POSTAL = re.compile(r"\b([ABCEGHJKLMNPRSTVXY])(\d[A-Za-z])[ -]?(\d[A-Za-z]\d)\b", re.I)
 # A name or a page title that says school, not masjid.
 SCHOOLISH = re.compile(r"\b(seminary|boarding school|school|academy|darul[- ]?uloom|madr[ae]sa\w*|college|"
                        r"universit\w*|institute)\b", re.I)
@@ -272,6 +289,35 @@ def moved_in_place(asked: str, landed: str) -> bool:
     return (a[-1:] == b[-1:]) or not a
 
 
+def elsewhere(entry: dict, text: str) -> list:
+    """Reasons to think a page is about another place than the masjid's own town and province.
+
+    Not for mentioning other places -- an umbrella body lists all of them, and a masjid may name
+    a sister masjid -- but for the two signs that a page is another masjid's: the masjid's own
+    town written with another state or province, and another province's postal codes. `text` is
+    the page's visible text as written, since "NY" is not "ny".
+    """
+    province = str(entry.get("province") or "")
+    code = PROVINCE_CODE.get(province)
+    city = str(entry.get("city") or "").strip()
+    out = []
+    if city and code:
+        for found in re.finditer(re.escape(city) + r"\s*,\s*([A-Z]{2})\b", text):
+            if found.group(1) != code:
+                out.append("prints '%s, %s' but this masjid is in %s" % (city, found.group(1), province))
+                break
+    if province:
+        foreign: dict = {}
+        for found in POSTAL.finditer(text):
+            where = POSTAL_PROVINCE.get(found.group(1).upper())
+            if where and where != province:
+                foreign.setdefault(where, "%s%s %s" % (found.group(1).upper(), found.group(2).upper(),
+                                                       found.group(3).upper()))
+        for where, sample in sorted(foreign.items()):
+            out.append("prints a postal code of %s (%s) but this masjid is in %s" % (where, sample, province))
+    return out
+
+
 def judge(entry: dict, research: dict, got: dict, cities: set) -> dict:
     url = entry["website"]
     report = {"name": entry["name"], "city": entry.get("city", ""), "province": entry.get("province", ""),
@@ -372,6 +418,17 @@ def judge(entry: dict, research: dict, got: dict, cities: set) -> dict:
     else:
         verdict = "NOT THIS MASJID"
         flags.append("neither the name (%s) nor %s appears" % (", ".join(words) or "no distinctive word", entry.get("city")))
+    away = elsewhere(entry, text)
+    if away:
+        if strong:
+            # its own address is on the page, so this is a sister masjid or a list of centres
+            doubts.extend(away)
+            if verdict == "OK":
+                verdict = "CHECK"
+        else:
+            if verdict in ("OK", "CHECK"):
+                verdict = "WRONG PLACE?"
+            flags.extend(away)
     flags.extend(doubts)
     report["verdict"] = verdict
     return report
