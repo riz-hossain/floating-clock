@@ -23,7 +23,7 @@ from . import (
     settings as cfg, themes, widgets as w, win32util as w32,
 )
 from . import __version__
-from . import cast as cast_mod, masjids as masjids_mod, routines as routines_mod, timeline
+from . import cast as cast_mod, masjids as masjids_mod, pickerflow as flow, routines as routines_mod, timeline, whereami
 from .timetext import clock_text, parse_clock_time
 from .calendars_ui import CalendarsPage
 
@@ -977,12 +977,26 @@ class SettingsUI(CalendarsPage):
         self._refresh_prayer_page()
 
     # --- finding a masjid --------------------------------------------------
+    def _picker_area(self, parent) -> tuple:
+        """(left, top, right, bottom) of the usable part of the monitor the settings window is on."""
+        try:
+            return w32.work_area(self._toplevel_hwnd(parent))
+        except Exception:
+            return (0, 0, parent.winfo_screenwidth(), parent.winfo_screenheight())
+
     def _open_masjid_picker(self) -> None:
-        """Search for a masjid by name or town and pick one from the list.
+        """Search for a masjid by name or town, or look around this computer, and pick one from the list.
 
         The address box still works for anyone who has a link, but nobody
         should have to go and find one: this looks the masjid up, and knows
         which of the things it finds can actually supply times.
+
+        The window is one size, fitted to the screen, whatever it is showing.
+        Its controls are laid out before the list or the timeline, which take
+        what is left and scroll; left to follow their contents the window grew
+        past the bottom of the screen and took its buttons with it. What is on
+        show and what the buttons say at each moment is decided in pickerflow,
+        which the Mac and Linux window shares.
         """
         ui = self._ui
         p = ui.p
@@ -998,59 +1012,128 @@ class SettingsUI(CalendarsPage):
         w32.set_titlebar(self._toplevel_hwnd(win), dark=p.is_dark,
                          colour=p.window, text=p.fg)
 
+        area = self._picker_area(parent)
+        shape = flow.size(area[2] - area[0], area[3] - area[1], ui.scale)
+        win.geometry("%dx%d" % shape)
+        win.minsize(*flow.smallest(shape[0], shape[1], ui.scale))
+        wrap = shape[0] - 2 * px(24)
+
         frame = tk.Frame(win, bg=p.window)
         frame.pack(fill="both", expand=True, padx=px(24), pady=(px(18), px(20)))
 
+        # Tk gives each widget the room it asks for in the order they are packed, and the last
+        # ones are squeezed. So the buttons and the line above them go first, from the bottom up,
+        # and the list or the timeline, packed last, has whatever is left.
+        buttons = tk.Frame(frame, bg=p.window)
+        buttons.pack(side="bottom", fill="x", pady=(px(12), 0))
+        note = w.label(frame, ui, "", 9, colour=p.muted, wraplength=wrap, justify="left")
+        note.configure(anchor="w")
+        note.pack(side="bottom", anchor="w", fill="x", pady=(px(8), 0))
+
         w.label(frame, ui, "Search by town, address or name", 10, "semibold").pack(anchor="w")
-        w.label(
+        explanation = w.label(
             frame, ui,
             "Masjids on mawaqit.net come with their congregation times. For "
             "the rest the clock reads the masjid's own website, the way you "
             "would, and shows you what it read before keeping it. Where a "
             "masjid publishes nothing readable, it can use the nearest one "
-            "that does. Map data © OpenStreetMap contributors.",
-            9, colour=p.muted, wraplength=px(520), justify="left",
-        ).pack(anchor="w", pady=(px(2), px(8)))
+            "that does. Near me lists the masjids around where this computer "
+            "is. Map data © OpenStreetMap contributors.",
+            9, colour=p.muted, wraplength=wrap, justify="left",
+        )
+        if flow.short(shape[1], ui.scale):           # on a short screen the list needs the room more
+            explanation.destroy()
+        else:
+            explanation.pack(anchor="w", pady=(px(2), px(8)))
 
         row = tk.Frame(frame, bg=p.window)
         row.pack(fill="x")
         box = w.Field(row, ui, width=34, placeholder="Calgary, a postal code, or your masjid's name")
         box.pack(side="left", fill="x", expand=True)
+        search_button = w.Button(row, ui, "Search", command=lambda: look(), kind="primary", padx=14)
+        search_button.pack(side="left", padx=(px(8), 0))
+        near_button = w.Button(row, ui, "Near me", command=lambda: nearby(), kind="default", padx=14)
+        near_button.pack(side="left", padx=(px(6), 0))
 
-        state: dict = {"rows": [], "busy": False, "pending": None, "trail": None,
-                       "showing": "list"}         # or "timeline", while a check is on show
+        # What fills the middle: the results, or, while a check runs and after it, a timeline of
+        # what is tried. Choosing a masjid takes a while, and a line of small print is no way to
+        # sit through it.
+        panel = tk.Frame(frame, bg=p.window)
+        panel.pack(fill="both", expand=True, pady=(px(10), 0))
+        results = w.ScrollFrame(panel, ui, bg=p.window)
+        listing = w.RowList(results.body, ui, on_select=lambda _key: sync(),
+                            empty="Nothing found yet", meta_width=0, min_height=6)
+        listing.pack(fill="x")
+        listing.on_activate = lambda _key: use()
+        checking = w.TimelineView(panel, ui)
 
-        note = w.label(frame, ui, "", 9, colour=p.muted,
-                       wraplength=px(520), justify="left")
+        main_button = w.Button(buttons, ui, "Use this masjid", command=lambda: use(),
+                               kind="primary", padx=16)
+        main_button.pack(side="left")
+        cancel_button = w.Button(buttons, ui, "Cancel", command=win.destroy,
+                                 kind="quiet", padx=16)
+        cancel_button.pack(side="left", padx=(px(8), 0))
+        # on show by turns, between those two: Stop while it works, Back to results after
+        stop_button = w.Button(buttons, ui, "Stop", command=lambda: stop(), kind="default", padx=16)
+        back_button = w.Button(buttons, ui, "Back to results", command=lambda: back_to_list(),
+                               kind="default", padx=16)
+
+        state: dict = {"rows": [], "mode": flow.LIST, "pending": None, "trail": None,
+                       "again": None, "listed": "", "stopping": False}
+
+        def alive() -> bool:
+            return bool(win.winfo_exists())
 
         def say(text: str) -> None:
             if note.winfo_exists():
                 note.configure(text=text)
 
-        listing = w.RowList(frame, ui, empty="Nothing found yet", meta_width=0,
-                            min_height=6)
-        # Choosing a masjid takes a while, and a line of small print is no way to sit
-        # through it: while it works the list gives way to a timeline of what is tried.
-        checking = w.TimelineView(frame, ui)
+        def put(widget, shown: bool, **options) -> None:
+            if shown and widget.winfo_manager() != "pack":
+                widget.pack(**options)
+            elif not shown and widget.winfo_manager():
+                widget.pack_forget()
+
+        def sync() -> None:
+            """Put on show what the picker's mode calls for, and set the buttons to match."""
+            c = flow.controls(state["mode"], listing.selected_key is not None)
+            main_button.set_text(c.main)
+            main_button.set_enabled(c.enabled)
+            search_button.set_enabled(c.look)
+            near_button.set_enabled(c.look)
+            stop_button.set_enabled(c.stop and not state["stopping"])
+            put(stop_button, c.stop, side="left", padx=(px(8), 0), before=cancel_button)
+            put(back_button, c.back, side="left", padx=(px(8), 0), before=cancel_button)
+            put(checking, c.timeline, fill="both", expand=True)
+            put(results, not c.timeline, fill="both", expand=True)
+
+        def set_mode(mode: str) -> None:
+            state["mode"] = mode
+            sync()
+
+        def busy() -> bool:
+            return state["mode"] in (flow.SEARCHING, flow.WORKING)
+
+        def on_wheel(event):
+            target = checking if flow.controls(state["mode"]).timeline else results
+            return target.wheel(event)
+
+        win.bind("<MouseWheel>", on_wheel)
 
         def back_to_list() -> None:
             """Show the list of masjids again, in place of the timeline."""
-            if state["showing"] == "timeline":
-                checking.pack_forget()
-                listing.pack(fill="both", expand=True, pady=(px(10), 0), before=note)
-                state["showing"] = "list"
-            back_button.pack_forget()
-            stop_button.pack_forget()
-            if state["rows"]:
-                say("Found %d. Pick one, then press Use this masjid." % len(state["rows"]))
+            state["pending"] = None
+            set_mode(flow.LIST)
+            say(state["listed"] or flow.WELCOME)
 
         def stop() -> None:
             """Give up on the check that is running. It stops at the next step it takes."""
             trail = state["trail"]
-            if trail is not None and state["busy"]:
+            if trail is not None and state["mode"] == flow.WORKING:
                 trail.cancel()
+                state["stopping"] = True
                 stop_button.set_enabled(False)
-                say("Stopping, after the step it is on\u2026")
+                say(flow.STOPPING)
 
         def on_destroy(event) -> None:
             # a check still running has no one to tell any more: stop it, rather than leave
@@ -1060,9 +1143,10 @@ class SettingsUI(CalendarsPage):
 
         win.bind("<Destroy>", on_destroy, add="+")
 
-        def show(found, trouble) -> None:
-            state["busy"] = False
+        def fill(found) -> None:
+            listing.select(None)                    # these rows are new: none of them is chosen yet
             state["rows"] = found
+            state["pending"] = None
             listing.set_items([
                 w.ListItem(
                     key=str(index),
@@ -1074,21 +1158,23 @@ class SettingsUI(CalendarsPage):
                 )
                 for index, entry in enumerate(found)
             ])
-            state["pending"] = None
-            if trouble:
-                say("Found %d. (%s)" % (len(found), trouble))
-            elif found:
-                say("Found %d. Pick one, then press Use this masjid." % len(found))
-            else:
-                say("Nothing matched. Try the town, or a postal code.")
+            results.scroll_top()
+
+        def show(found, trouble) -> None:
+            if not alive():
+                return
+            fill(found)
+            set_mode(flow.LIST)
+            state["listed"] = flow.found(len(found), trouble)
+            say(state["listed"])
 
         def look(_event=None) -> None:
             text = box.get().strip()
-            if not text or state["busy"]:
+            if not text or busy():
                 return
-            state["busy"] = True
-            back_to_list()
-            say("Searching…")
+            state["pending"] = None
+            set_mode(flow.SEARCHING)
+            say(flow.LOOKING)
 
             def work() -> None:
                 try:
@@ -1098,9 +1184,50 @@ class SettingsUI(CalendarsPage):
                 try:
                     self.root.after(0, show, found, trouble)
                 except Exception:
-                    state["busy"] = False
+                    pass
 
             threading.Thread(target=work, name="floating-clock-masjid-search",
+                             daemon=True).start()
+
+        def nearby() -> None:
+            """List the masjids around this computer: ask where it is, then what lies around that."""
+            if busy():
+                return
+            state["pending"] = None
+            state["again"] = nearby
+            state["stopping"] = False
+            trail = state["trail"] = timeline.Timeline()
+            checking.watch(trail)
+            set_mode(flow.WORKING)
+            say(flow.LOCATING)
+
+            def work() -> None:
+                where, failure = None, ""
+                try:
+                    found, trouble, where = masjids_mod.near_me(trail=trail)
+                except whereami.Unavailable as exc:
+                    found, trouble, failure = [], "", str(exc)
+                except Exception as exc:        # finding where you are must never crash
+                    found, trouble, failure = [], "", str(exc)[:90] or exc.__class__.__name__
+                try:
+                    self.root.after(0, arrived, found, trouble, where, failure)
+                except Exception:
+                    pass
+
+            def arrived(found, trouble, where, failure) -> None:
+                if not alive():
+                    return
+                checking.stop()
+                if where is None:               # it could not be found out, or the person stopped it
+                    set_mode(flow.FAILED)
+                    say(flow.unlocated(failure or trouble))
+                    return
+                fill(found)
+                set_mode(flow.LIST)
+                state["listed"] = flow.around(len(found), where, masjids_mod.NEAR_ME_KM, trouble)
+                say(state["listed"])
+
+            threading.Thread(target=work, name="floating-clock-masjid-near-me",
                              daemon=True).start()
 
         def keep(proposal: dict) -> None:
@@ -1116,98 +1243,76 @@ class SettingsUI(CalendarsPage):
             self.refresh_prayers()
             win.destroy()
 
-        def use() -> None:
-            key = listing.selected_key
-            if key is None:
-                say("Pick one from the list first.")
-                return
-            if state["busy"]:
-                return
-            pending = state["pending"]
-            if pending is not None and pending["key"] == key:
-                keep(pending["proposal"])              # the second press: they have seen it
-                return
-            state["pending"] = None
-            entry = state["rows"][int(key)]
+        def check(index: int) -> None:
+            """Prove a masjid before saving it, showing what is tried. Done keeps it, once it is found."""
+            entry = state["rows"][index]
+            rows = list(state["rows"])
             name = str(entry.get("name") or "that masjid")
-            # Prove it before saving it. Most masjid websites publish nothing
-            # the clock can read, and saving one of those would replace times
-            # that work with none at all.
-            state["busy"] = True
+            # Most masjid websites publish nothing the clock can read, and saving one of those
+            # would replace times that work with none at all.
+            state["pending"] = None
+            state["again"] = lambda: check(index)
+            state["stopping"] = False
             trail = state["trail"] = timeline.Timeline()
-            height = max(listing.winfo_height(), px(300))
-            listing.pack_forget()
-            checking.pack(fill="both", expand=True, pady=(px(10), 0), before=note)
-            state["showing"] = "timeline"
-            checking.watch(trail, height=height)
-            use_button.set_enabled(False)
-            back_button.pack_forget()
-            stop_button.set_enabled(True)
-            stop_button.pack(side="left", padx=(px(8), 0), before=cancel_button)
-            say("Checking %s. This can take a minute; Stop gives up." % name)
+            checking.watch(trail)
+            set_mode(flow.WORKING)
+            say(flow.checking(name))
 
             def work() -> None:
                 try:
-                    proposal = masjids_mod.propose(entry, state["rows"], trail=trail)
+                    proposal = masjids_mod.propose(entry, rows, trail=trail)
                 except Exception as exc:        # a check must never crash
                     proposal = {"kind": "none", "status": "%s: %s" % (
                         name, str(exc)[:90] or exc.__class__.__name__)}
                 try:
-                    self.root.after(0, done, key, proposal)
+                    self.root.after(0, done, proposal)
                 except Exception:
-                    state["busy"] = False
+                    pass
 
-            def done(key, proposal) -> None:
-                state["busy"] = False
-                if not win.winfo_exists():
+            def done(proposal) -> None:
+                if not alive():
                     return
                 kind = proposal.get("kind")
                 # the timeline is closed by whatever ran the check; if that was cut short, close it here
                 trail.finish("none" if kind == "none" else "found",
                              proposal.get("status") if kind == "none" else "")
                 checking.stop()
-                use_button.set_enabled(True)
-                stop_button.pack_forget()
-                back_button.pack(side="left", padx=(px(8), 0), before=cancel_button)
                 if kind == "none":
+                    set_mode(flow.FAILED)
                     say("%s  Nothing was changed." % proposal.get("status", ""))
                 else:
-                    # Whatever was found is shown first, and kept on a second press.
-                    state["pending"] = {"key": key, "proposal": proposal}
+                    # Whatever was found is shown first, and kept when the person presses Done.
+                    state["pending"] = proposal
+                    set_mode(flow.FOUND)
                     say(masjids_mod.confirmation(proposal, bool(self.s.get("use_24h"))))
 
             threading.Thread(target=work, name="floating-clock-masjid-verify",
                              daemon=True).start()
 
-        box.entry.bind("<Return>", look)
-        w.Button(row, ui, "Search", command=look, kind="primary",
-                 padx=14).pack(side="left", padx=(px(8), 0))
-        listing.pack(fill="both", expand=True, pady=(px(10), 0))
-        listing.on_activate = lambda _key: use()
-        note.pack(anchor="w", pady=(px(8), 0))
+        def use() -> None:
+            """The main button: check the masjid picked; Done, once times are found; Try again, if not."""
+            c = flow.controls(state["mode"], listing.selected_key is not None)
+            if c.action == flow.KEEP and state["pending"] is not None:
+                keep(state["pending"])
+            elif c.action == flow.AGAIN and state["again"] is not None:
+                state["again"]()
+            elif c.action == flow.CHECK:
+                if listing.selected_key is None:
+                    say(flow.PICK_FIRST)
+                else:
+                    check(int(listing.selected_key))
 
-        buttons = tk.Frame(frame, bg=p.window)
-        buttons.pack(fill="x", pady=(px(12), 0))
-        use_button = w.Button(buttons, ui, "Use this masjid", command=use,
-                              kind="primary", padx=16)
-        use_button.pack(side="left")
-        cancel_button = w.Button(buttons, ui, "Cancel", command=win.destroy,
-                                 kind="quiet", padx=16)
-        cancel_button.pack(side="left", padx=(px(8), 0))
-        # shown by turns, between those two: Stop while it works, Back to results after
-        stop_button = w.Button(buttons, ui, "Stop", command=stop, kind="default", padx=16)
-        back_button = w.Button(buttons, ui, "Back to results", command=back_to_list,
-                               kind="default", padx=16)
+        box.entry.bind("<Return>", look)
+        sync()
 
         win.update_idletasks()
-        win.geometry("+%d+%d" % (
-            parent.winfo_rootx() + max(0, (parent.winfo_width() - win.winfo_width()) // 2),
-            parent.winfo_rooty() + px(60),
-        ))
+        x, y = flow.place((parent.winfo_rootx(), parent.winfo_rooty(),
+                           parent.winfo_width(), parent.winfo_height()), shape, area, ui.scale)
+        win.geometry("%dx%d+%d+%d" % (shape[0], shape[1], x, y))
         if self.settings_visible:
             win.deiconify()
             box.entry.focus_set()
-        say("Type a town or a masjid's name, then press Search.")
+        say(flow.WELCOME)
 
     # --- routine triggers --------------------------------------------------
     def _routine_same_for_all(self) -> None:

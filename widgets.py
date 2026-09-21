@@ -926,7 +926,7 @@ class Field(tk.Frame):
             selectbackground=p.accent, selectforeground=p.on_accent,
             disabledbackground=p.field,
         )
-        self.entry.pack(padx=ui.px(11), pady=ui.px(7))
+        self.entry.pack(fill="x", expand=True, padx=ui.px(11), pady=ui.px(7))   # text starts at the left, however wide
         self._focused = False
         self._size = (0, 0)
         self.bind("<Configure>", self._redraw)
@@ -1318,7 +1318,7 @@ class TimelineView(tk.Frame):
         self._drag_from = None
         self.canvas.configure(yscrollcommand=self._on_scroll)
         self.canvas.bind("<Configure>", lambda _e: self._draw())
-        self.canvas.bind("<MouseWheel>", self._wheel)
+        self.canvas.bind("<MouseWheel>", self.wheel)
         self.bar.bind("<Button-1>", self._bar_press)
         self.bar.bind("<B1-Motion>", self._bar_drag)
         self.bind("<Destroy>", self._gone)
@@ -1475,7 +1475,8 @@ class TimelineView(tk.Frame):
             return
         self.bar.coords(self._thumb, 0, lo * h, self.ui.px(6), hi * h)
 
-    def _wheel(self, event) -> str | None:
+    def wheel(self, event) -> str | None:
+        """Route a wheel event here; returns "break" if it was consumed."""
         lo, hi = self.canvas.yview()
         if hi - lo >= 0.999:
             return None
