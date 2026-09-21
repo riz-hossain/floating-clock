@@ -97,6 +97,14 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-steps.py
+      - name: The bundled masjid directory, offline
+        # The research behind data/masjids.json has websites that are another
+        # masjid's, dead, or a news article; the clock would show those times as
+        # this masjid's. This holds the file to the corrections made to it, and
+        # to one website not standing for masjids in different places.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-directory.py
       - name: A page whose times a script writes in
         # A real headless Chrome on a page served from this machine: the
         # browser driver, and that nothing is left running afterwards.
