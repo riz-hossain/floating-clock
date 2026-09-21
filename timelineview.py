@@ -47,16 +47,24 @@ class Metrics:
 
 
 def headline(snap: dict) -> tuple[str, str]:
-    """(what to say above the bar, and the role to say it in)."""
+    """(what to say above the bar, and the role to say it in).
+
+    The words come with the timeline (Timeline.plan): a check of one masjid says "Checking
+    <name>" and "Times found", finding the masjids near you says its own.
+    """
+    words = snap.get("words") or timeline.CHECK_WORDS
     name = snap.get("title") or ""
     outcome = snap.get("outcome") or ""
     if not outcome:
-        return ("Checking %s" % name if name else "Getting ready", FG)
+        busy = words.get("busy") or timeline.CHECK_WORDS["busy"]
+        if "%s" in busy:
+            return (busy % name if name else "Getting ready", FG)
+        return (busy, FG)
     if outcome == "found":
-        return ("Times found", GOOD)
+        return (words.get("found") or timeline.CHECK_WORDS["found"], GOOD)
     if outcome == "stopped":
-        return ("Stopped", MUTED)
-    return ("Nothing readable", BAD)
+        return (words.get("stopped") or timeline.CHECK_WORDS["stopped"], MUTED)
+    return (words.get("none") or timeline.CHECK_WORDS["none"], BAD)
 
 
 def fit(text: str, room: int, measure, bold: bool = False, small: bool = False) -> str:

@@ -25,6 +25,17 @@ Open **Calendar → Prayer times…** and press **Find my masjid…**. Type a to
 an address, a postal code or a masjid's name, and pick yours from the list.
 That is the whole setup: nothing to look up and no address to find.
 
+Or press **Near me**, and the list is the masjids within 20 km of where this
+computer is, nearest first, with how far each is. The clock asks Windows where
+the computer is, the way any program can (Settings → Privacy & security →
+Location, with *Let desktop apps access your location* on). If Windows will not
+say, or on a Mac or Linux computer, it works it out from the computer's
+internet address instead — one request to a public lookup service, which sees
+only that address — and says so, because that puts you in the right town rather
+than on the right street; if it is out, type your town instead. The position is
+used for that one search. It is not kept, and it is not written to the
+settings.
+
 The list is put together from three places at once:
 
 - **OpenStreetMap**, searched live. Everything mapped as a masjid or prayer
@@ -70,7 +81,8 @@ reader, so the clock treats it warily:
 And **the clock shows you what it found before it keeps it.** Press *Use this
 masjid* and the five times appear for you to check against the masjid -- whether
 they came from a page or a feed, since a listing can be out of date too -- with a
-note if the sun objects to one of them; press the button again to keep them.
+note if the sun objects to one of them; press *Done* to keep them, or *Back to
+results* to look at another masjid.
 
 ### When a masjid publishes nothing the clock can read
 
