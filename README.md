@@ -24,8 +24,10 @@ run a Qt one. Everything underneath is the same code.
   it offers the nearest one that does, labelled as that masjid's times and not
   its own. A PrayersConnect page or an iqamah iCal address work too.
 - **Routines** — at each prayer the clock can call a trigger address (so an
-  Alexa routine stops depending on a fixed time) or play your adhan straight
-  on a Google or Nest speaker. See [ROUTINES.md](ROUTINES.md).
+  Alexa routine stops depending on a fixed time), play your adhan straight on
+  a Google or Nest speaker, or play it through this computer's own speakers
+  or headphones — no speaker or account needed at all. See
+  [ROUTINES.md](ROUTINES.md).
 - **Alarms, timers and a stopwatch**, with reminders before meetings and
   before each iqama.
 

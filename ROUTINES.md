@@ -4,18 +4,20 @@ Iqama times move through the year, so a routine set to "Every day, at 6:05 PM"
 is right for about a week. Floating Clock can run those routines instead, at
 whatever the masjid's calendar says for that day.
 
-There are two ways to do it, and which one you want depends on what you have:
+There are three ways to do it, and which one you want depends on what you have:
 
-| | **Trigger a routine** | **Play on the speaker** |
-|---|---|---|
-| Works with | Alexa, and Google via Home Assistant or IFTTT | Google Home, Nest, Chromecast |
-| Setup | a trigger skill or a webhook, once per prayer | pick your speaker from a list |
-| Can do | anything the routine does — lights, volume, several speakers | play your adhan |
-| Needs | an account with the trigger service | nothing; it is all on your network |
+| | **Trigger a routine** | **Play on the speaker** | **Play on this computer** |
+|---|---|---|---|
+| Works with | Alexa, and Google via Home Assistant or IFTTT | Google Home, Nest, Chromecast | any Windows, Mac or Linux machine |
+| Setup | a trigger skill or a webhook, once per prayer | pick your speaker from a list | pick a file, once |
+| Can do | anything the routine does — lights, volume, several speakers | play your adhan | play your adhan |
+| Needs | an account with the trigger service | nothing; it is all on your network | nothing at all — no speaker, no account, no network |
 
 If all you want is the adhan on a Google or Nest speaker, use the speaker — it
 is the shorter road by a long way. Use a routine when something else has to
-happen too, or when you are on Alexa.
+happen too, or when you are on Alexa. Use **Play on this computer** when
+there is no speaker to reach at all — travelling with just the laptop, most
+of all.
 
 ## Where the times come from
 
@@ -194,6 +196,38 @@ row beneath; any prayer left blank uses the one at the top.
 **What it needs.** The machine has to be awake, and on the same network as the
 speaker. A local file is served to the speaker from this machine for a few
 minutes while it plays; a link is fetched by the speaker itself.
+
+---
+
+## Playing the adhan on this computer
+
+No speaker, no assistant, no account — the clock plays the adhan itself,
+through whatever this machine's own speakers or headphones are. This is what
+is still there when travelling with just the laptop, or anywhere else none of
+the above reaches.
+
+Nothing is installed to do it. Windows, macOS and Linux each already carry
+something that can play a file, so the clock uses that: Windows' own MCI
+service, macOS's `afplay`, and on Linux whichever of a few common players is
+actually on the machine.
+
+1. Open **Calendar → Prayer times…** and find the **Play on this computer**
+   card, under the speaker card.
+2. Choose the **Adhan** — a file on this machine (press *Choose…*) or a link.
+   Nothing is shipped with the clock, so this is your own recording.
+3. Set **Play this long before iqama**, and the **volume**. Not every format
+   on every system can be set from here; where it cannot, playback is left at
+   whatever the system is already playing at.
+4. Press **Test**. The adhan should start right there.
+5. Switch on **Play the adhan here at each prayer**.
+
+Fajr's adhan has a line the others do not, so give Fajr its own file in the
+row beneath; any prayer left blank uses the one at the top.
+
+**What it needs.** The machine has to be awake. A link is downloaded to a
+temporary file first and deleted again once it has played; nothing about it
+is kept. On Linux, if none of `paplay`, `ffplay`, `mpg123` or `cvlc` is
+installed, the card says so — installing any one of them is enough.
 
 ---
 

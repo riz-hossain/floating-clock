@@ -24,12 +24,13 @@ import logging
 import threading
 from datetime import datetime
 
-from . import cast as cast_mod, prayer as prayer_mod
+from . import cast as cast_mod, localaudio, prayer as prayer_mod
 
 log = logging.getLogger(__name__)
 
 HOOK = "routine"
 CAST = "cast"
+LOCAL = "local"
 
 # Beyond this many remembered "already done" marks, the old ones are dropped.
 # Two kinds, seven prayers, a couple of days: forty is well clear of a day's
@@ -37,16 +38,17 @@ CAST = "cast"
 KEEP_MARKS = 40
 
 
-def media_table(settings) -> dict:
-    """Per-prayer audio, with the default standing in for every blank.
+def media_table(settings, prefix: str = "prayer_cast") -> dict:
+    """Per-prayer audio for `prefix` ("prayer_cast" or "prayer_local"), with the
+    default standing in for every blank.
 
     With no default set the table is left sparse, so prayer.hook_for's rule
     still applies and Friday's Jumuah borrows Dhuhr's adhan. With a default,
     every prayer has something and there is nothing to borrow.
     """
-    default = str(settings.get("prayer_cast_media_default") or "").strip()
+    default = str(settings.get("%s_media_default" % prefix) or "").strip()
     table = {name: str(value or "").strip()
-             for name, value in (settings.get("prayer_cast_media") or {}).items()
+             for name, value in (settings.get("%s_media" % prefix) or {}).items()
              if str(value or "").strip()}
     if not default:
         return table
@@ -60,8 +62,8 @@ class Runner:
         self.s = settings
         # on_status(kind, text) -- the host marshals to its own UI thread.
         self.on_status = on_status or (lambda kind, text: None)
-        self.status = {HOOK: "", CAST: ""}
-        # One set for both kinds; hook_key's prefix keeps them apart.
+        self.status = {HOOK: "", CAST: "", LOCAL: ""}
+        # One set for all three kinds; hook_key's prefix keeps them apart.
         self._fired: set[str] = set()
 
     # --- the loop ----------------------------------------------------------
@@ -80,8 +82,13 @@ class Runner:
         if self.s.get("prayer_cast_enabled", False):
             self._fire_due(prayers, now, CAST,
                            self.s.get("prayer_cast_lead_minutes", 10),
-                           media_table(self.s),
+                           media_table(self.s, "prayer_cast"),
                            self.fire_cast)
+        if self.s.get("prayer_local_enabled", False):
+            self._fire_due(prayers, now, LOCAL,
+                           self.s.get("prayer_local_lead_minutes", 10),
+                           media_table(self.s, "prayer_local"),
+                           self.fire_local)
         if len(self._fired) > KEEP_MARKS:
             self._fired = prayer_mod.prune_keys(self._fired, now)
 
@@ -113,9 +120,15 @@ class Runner:
         if self.s.get("prayer_cast_enabled", False):
             found = prayer_mod.next_hook(
                 prayers, now, float(self.s.get("prayer_cast_lead_minutes", 10) or 0),
-                media_table(self.s))
+                media_table(self.s, "prayer_cast"))
             if found and (soonest is None or found[1] < soonest[1]):
                 soonest = (found[0], found[1], CAST)
+        if self.s.get("prayer_local_enabled", False):
+            found = prayer_mod.next_hook(
+                prayers, now, float(self.s.get("prayer_local_lead_minutes", 10) or 0),
+                media_table(self.s, "prayer_local"))
+            if found and (soonest is None or found[1] < soonest[1]):
+                soonest = (found[0], found[1], LOCAL)
         return soonest
 
     # --- the two things a moment can do ------------------------------------
@@ -165,6 +178,32 @@ class Runner:
                 self._say(CAST, "%s playing at %s on %s." % (name, when, device))
 
         self._work(work, "cast")
+
+    def fire_local(self, name: str, media: str) -> None:
+        """Play one prayer's adhan through this computer's own speakers, on a worker.
+
+        No network, no account, no other device needed -- for wherever the other two
+        do not reach, travelling most of all.
+        """
+        when = datetime.now().strftime("%H:%M")
+        try:
+            volume = float(self.s.get("prayer_local_volume", 0.6))
+        except (TypeError, ValueError):
+            volume = 0.6
+
+        def work() -> None:
+            try:
+                problem = localaudio.play(media, volume)
+            except Exception as exc:   # a bad file or a missing player must not kill the worker
+                problem = _short(exc)
+            if problem:
+                log.warning("Adhan for %s did not play here at %s: %s", name, when, problem)
+                self._say(LOCAL, "%s at %s: %s" % (name, when, problem))
+            else:
+                log.info("Adhan for %s playing here at %s", name, when)
+                self._say(LOCAL, "%s playing here at %s." % (name, when))
+
+        self._work(work, "local")
 
     # --- plumbing ----------------------------------------------------------
     def _work(self, target, what: str) -> None:

@@ -113,6 +113,21 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-directory.py
+      - name: The adhan through this computer's own speakers
+        # No smart speaker and no assistant needed -- travelling, most of all.
+        # The DLL, the subprocess, which players exist and the network are all
+        # parameters here, so this drives the real decisions (Windows' MCI, macOS's
+        # afplay, whichever of paplay/ffplay/mpg123/cvlc Linux actually has) without
+        # any of them being real.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-localaudio.py
+      - name: Routines fire the right kind, once, for the right prayer
+        # A trigger URL, a cast, or this computer's own speakers -- whichever
+        # combination is switched on, at the right moment, and not twice.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-routines.py
       - name: A page whose times a script writes in
         # A real headless Chrome on a page served from this machine: the
         # browser driver, and that nothing is left running afterwards.

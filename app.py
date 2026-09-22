@@ -1517,6 +1517,9 @@ class FloatingClock(SettingsUI):
     def fire_cast(self, name: str, media: str) -> None:
         self.routines.fire_cast(name, media)
 
+    def fire_local(self, name: str, media: str) -> None:
+        self.routines.fire_local(name, media)
+
     def _poll_nudge(self, now: datetime, events) -> None:
         """A meeting a minute out: fly the clock in and shake it.
 
