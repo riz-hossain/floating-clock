@@ -1,31 +1,31 @@
-# floating-clock
+# Floating Clock
+
+[![Build](https://github.com/riz-hossain/floating-clock/actions/workflows/build.yml/badge.svg)](https://github.com/riz-hossain/floating-clock/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/riz-hossain/floating-clock)](https://github.com/riz-hossain/floating-clock/releases)
 
 A floating, always-on-top desktop clock that keeps your next meeting, your
-day's shape and your masjid's prayer times in front of you — and can make the
-house follow them.
+day's shape and your masjid's prayer times in front of you — and can make
+the house follow them.
 
 Windows, macOS and Linux. Windows runs a Tk-plus-Win32 host; macOS and Linux
-run a Qt one. Everything underneath is the same code.
+run a Qt one — everything underneath is the same code.
 
 ## What it does
 
-- **The clock** — a translucent card you can put anywhere, with a day bar that
-  fills as the day goes, and a peek that glides it to the middle of the screen
-  when you ask.
-- **Meetings** — from Outlook on Windows, and on every platform from CalDAV,
-  iCal links, and Google or Microsoft sign-in. The next few sit under the
-  time; a click joins the call.
-- **Prayer times** — press *Find my masjid*, type a town, an address or a
-  postal code, and pick yours from the list (OpenStreetMap, mawaqit.net and a
-  bundled directory, searched together) — or press *Near me* to list the
-  masjids around where this computer is. The clock reads the masjid's times the
-  way you would from its website, shows you what it found, keeps it when you
-  press *Done*, and checks nightly for changes. Where a masjid publishes nothing it can read,
-  it offers the nearest one that does, labelled as that masjid's times and not
-  its own. A PrayersConnect page or an iqamah iCal address work too.
-- **Routines** — at each prayer the clock can call a trigger address (so an
-  Alexa routine stops depending on a fixed time) or play your adhan straight
-  on a Google or Nest speaker. See [ROUTINES.md](ROUTINES.md).
+- **The clock** — a translucent, always-on-top card you can put anywhere,
+  with a day bar that fills as the day goes and a peek that glides it to
+  centre screen when you ask.
+- **Meetings** — Outlook on Windows, or on any platform via CalDAV, iCal
+  links, and Google or Microsoft sign-in. The next few sit under the time;
+  one click joins.
+- **Prayer times** — press *Find my masjid* or *Near me*, pick yours from
+  the list, and the clock reads its times the way you would from its
+  website — shows you what it found before keeping it, and rechecks every
+  night. If a masjid has nothing online it can read, it offers the nearest
+  one that does, clearly labelled as borrowed.
+- **Routines** — trigger an Alexa routine at each prayer, or play the adhan
+  straight on a Google or Nest speaker, right at iqama instead of a fixed
+  clock time. See [ROUTINES.md](ROUTINES.md).
 - **Alarms, timers and a stopwatch**, with reminders before meetings and
   before each iqama.
 
