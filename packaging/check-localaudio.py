@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 
 from floating_clock import localaudio as la
 
@@ -35,6 +36,16 @@ def safe(fn, *a, **kw):
         return fn(*a, **kw)
     except Exception as exc:                        # noqa: BLE001
         return "!! raised %s instead of reporting it: %s" % (exc.__class__.__name__, exc)
+
+
+def wait_for(predicate, seconds: float = 2.0) -> bool:
+    """Poll predicate() until it is true or the time is up -- for state a background thread sets."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
 
 
 HERE = os.path.abspath(__file__)      # a real file on disk, so check_media("") style checks pass
@@ -206,11 +217,19 @@ print("Windows: MCI")
 
 
 class FakeMci:
-    """A stand-in for winmm: records every command, and can be told how to answer one."""
+    """A stand-in for winmm: records every command, and can be told how to answer one.
 
-    def __init__(self) -> None:
+    held=True keeps "status ... mode" answering "playing" for ever, the way a real player
+    genuinely still running would -- until a "stop <alias>" command is itself seen, which is
+    what real MCI's stop does, and after that it answers "stopped" instead. held=False (the
+    default) instead runs down a short fixed sequence on its own, ending "stopped", so a check
+    that is not about stopping does not have to send one to ever see the play finish.
+    """
+
+    def __init__(self, held: bool = False) -> None:
         self.commands: list[str] = []
         self.refuse: dict[str, str] = {}       # a command word -> the error text to give it
+        self.held = held
         self.status_sequence = ["playing", "playing", "stopped"]
         self.closed = threading.Event()
 
@@ -220,7 +239,10 @@ class FakeMci:
         if word in self.refuse:
             return 999
         if command.startswith("status") and command.endswith("mode"):
-            state = self.status_sequence.pop(0) if len(self.status_sequence) > 1 else self.status_sequence[0]
+            if self.held:
+                state = "stopped" if any(c.startswith("stop ") for c in self.commands) else "playing"
+            else:
+                state = self.status_sequence.pop(0) if len(self.status_sequence) > 1 else self.status_sequence[0]
             reply.value = state
         elif word == "close":
             self.closed.set()
@@ -302,11 +324,25 @@ print("macOS: afplay")
 
 
 class FakeProcess:
-    def __init__(self) -> None:
+    """However Popen behaves for these purposes: wait() blocks until the process has exited, and
+    terminate() is what makes a still-running one exit. auto_exit=True (the default) has already
+    exited by the time anything asks -- a real short player mostly would have too by then; pass
+    False to hold it "running" until terminate() is called, for the checks that stop one."""
+
+    def __init__(self, auto_exit: bool = True) -> None:
         self.waited = threading.Event()
+        self.terminated = threading.Event()
+        self._exited = threading.Event()
+        if auto_exit:
+            self._exited.set()
 
     def wait(self):
+        self._exited.wait(5.0)
         self.waited.set()
+
+    def terminate(self):
+        self.terminated.set()
+        self._exited.set()
 
 
 def recording_popen(log):
@@ -383,6 +419,66 @@ result = safe(la._play_linux, HERE, None, cleanup=None, which=which_only("paplay
              popen=lambda args, **kw: (_ for _ in ()).throw(OSError("permission denied")))
 check("a player that is found but will not start is reported, not crashed on",
       result == "permission denied", result)     # exactly that, from _play_linux itself -- not safe()'s own fallback text
+
+# --- stopping whatever is playing --------------------------------------------------------------
+print("stop()")
+la._current = None      # a clean slate: an earlier section's background thread may not have unregistered yet
+check("stopping when nothing here is playing is not a problem", la.stop() == "")
+
+held = FakeProcess(auto_exit=False)
+la._play_macos(HERE, None, cleanup=None, popen=lambda args, **kw: held)
+check("play() registers what it started", la._current is not None)
+result = la.stop()
+check("stop() reaches it", held.terminated.is_set() and result == "")
+check("terminating it is what lets the background wait finish",
+      held.waited.wait(timeout=2.0) and held._exited.is_set())
+check("and it un-registers itself once that wait ends",
+      wait_for(lambda: la._current is None))
+
+before = FakeProcess()      # auto_exit=True: already finished by the time anything asks
+la._play_macos(HERE, None, cleanup=None, popen=lambda args, **kw: before)
+check("once playback has finished on its own, stop() finds nothing to do",
+      wait_for(lambda: la._current is None) and la.stop() == "", "current=%r" % la._current)
+check("and never calls terminate on something that is already gone", not before.terminated.is_set())
+
+first, second = FakeProcess(auto_exit=False), FakeProcess(auto_exit=False)
+la._play_macos(HERE, None, cleanup=None, popen=lambda args, **kw: first)
+la._play_macos(HERE, None, cleanup=None, popen=lambda args, **kw: second)
+la.stop()
+check("a second play before the first ends becomes the one stop() reaches",
+      second.terminated.is_set() and not first.terminated.is_set())
+first.terminate()
+second.terminate()
+
+class RefusesToStop:
+    """Stays "running" (wait() blocks) so there is a real window for stop() to reach it before
+    the background thread would otherwise unregister it on its own."""
+
+    def __init__(self) -> None:
+        self._held = threading.Event()
+
+    def wait(self):
+        self._held.wait(2.0)     # a safety cap; terminate() below never sets it
+
+    def terminate(self):
+        raise OSError("already gone")
+
+
+la._play_macos(HERE, None, cleanup=None, popen=lambda args, **kw: RefusesToStop())
+result = safe(la.stop)
+check("a stop that itself fails is reported, not raised", result == "already gone", result)
+
+print("stop() on Windows: MCI")
+la._current = None
+dll6 = FakeMci(held=True)
+la._play_windows(HERE, None, cleanup=None, dll=dll6, sleep=lambda s: time.sleep(0.02))
+stop_result = la.stop()
+check("stop() sends MCI's own stop command", any(c.startswith("stop ") for c in dll6.commands), str(dll6.commands))
+check("and reports it as having worked", stop_result == "", stop_result)
+check("which is what lets the poll loop see it end, and close the alias",
+      dll6.closed.wait(timeout=2.0), str(dll6.commands))
+check("and un-register, so a later stop() has nothing left to do here",
+      wait_for(lambda: la._current is None) and la.stop() == "")
 
 print()
 if failures:

@@ -176,10 +176,12 @@ class FloatingClock(SettingsUI):
         # neither fires twice for the same meeting or prayer.
         self._nudged: set[str] = set()
         self._prayer_notified: set[str] = set()
-        # What each prayer sets off -- the trigger URLs and the speaker --
-        # and the last word on how that went, which the settings page shows.
-        # Shared with the Qt host, which owns one of these too.
-        self.routines = routines_mod.Runner(self.s, on_status=self._routine_status)
+        # What each prayer sets off -- the trigger URLs, the speaker and this
+        # computer's own playback -- and the last word on how that went,
+        # which the settings page shows. Shared with the Qt host, which owns
+        # one of these too.
+        self.routines = routines_mod.Runner(
+            self.s, on_status=self._routine_status, on_warn=self._adhan_warning)
         self._last_heartbeat: datetime | None = None
         self._loop_errors: dict[str, float] = {}
         self.peek = None
@@ -1509,6 +1511,36 @@ class FloatingClock(SettingsUI):
         except Exception:
             pass                       # the window has gone; the log still has it
 
+    def _adhan_warning(self, item, kinds: list, seconds_left: int) -> None:
+        """A prayer's routine, speaker or local playback is about to fire. Hop to the UI thread."""
+        try:
+            self.root.after(0, self._show_adhan_toast, item, kinds, seconds_left)
+        except Exception:
+            pass                       # the window has gone
+
+    def _show_adhan_toast(self, item, kinds: list, seconds_left: int) -> None:
+        self._show_toast(alerts.Fired(
+            kind="adhan", title="%s adhan" % item.name,
+            detail="%s, in about %ds." % (self._adhan_detail(kinds), max(0, round(seconds_left))),
+            key="adhan:%s" % item.key,
+        ))
+
+    def _adhan_detail(self, kinds: list) -> str:
+        where = []
+        if routines_mod.LOCAL in kinds:
+            where.append("here")
+        if routines_mod.CAST in kinds:
+            device = str(self.s.get("prayer_cast_device") or "").strip()
+            where.append("on %s" % device if device else "on the speaker")
+        text = "Playing %s" % " and ".join(where) if where else ""
+        if routines_mod.HOOK in kinds:
+            text = "%s, and calling a routine" % text if text else "Calling a routine"
+        return text or "Playing"
+
+    def _stop_adhan(self, _fired=None) -> None:
+        """The toast's Stop button, and the tray menu's -- the same action either way."""
+        self.routines.stop_now()
+
     # The settings page's "Test" buttons, which prove the wiring without
     # waiting for a prayer.
     def fire_routine(self, name: str, url: str) -> None:
@@ -1544,16 +1576,19 @@ class FloatingClock(SettingsUI):
         try:
             popup = toast_mod.Toast(
                 self.root, fired, self.s["theme"], self._scale,
-                on_close=self._close_toast, on_snooze=self._snooze,
+                on_close=self._close_toast, on_snooze=self._snooze, on_stop=self._stop_adhan,
             )
         except Exception:
             # A popup failing must never take the clock down with it.
             return
         self._toasts.append(popup)
         popup.show(len(self._toasts) - 1, sound=bool(self.s["alerts_sound"]))
-        # Meeting reminders and finished timers step aside on their own;
-        # an alarm waits to be acknowledged.
-        if fired.kind != "alarm":
+        # Meeting reminders and finished timers step aside on their own; an alarm waits to be
+        # acknowledged; an adhan warning is given longer, since Stop stays useful well past the
+        # 30 seconds anything else gets -- the tray menu offers the same Stop for as long as that.
+        if fired.kind == "adhan":
+            self.root.after(60000, popup.close)
+        elif fired.kind != "alarm":
             self.root.after(30000, popup.close)
 
     def _close_toast(self, popup) -> None:
@@ -1693,9 +1728,13 @@ class FloatingClock(SettingsUI):
             pm.command("Start / stop stopwatch", self.toggle_stopwatch),
             pm.command("Reset stopwatch", self.reset_stopwatch),
         ]
+        # Stopping an adhan, when one is due or playing, comes before everything else: it is
+        # urgent in a way nothing else on this menu is, and it is not always there.
+        stopping = self.routines.stoppable()
         # A short top level: the two things you reach for, then one submenu
         # per topic, then the two ways out.
         return [
+            *([pm.command("Stop %s's adhan" % stopping.name, self._stop_adhan)] if stopping else []),
             pm.command("Today's meetings", self.toggle_meetings),
             pm.command("Settings…", self.open_settings),
             pm.separator(),

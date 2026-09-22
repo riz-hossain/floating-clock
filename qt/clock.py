@@ -247,7 +247,8 @@ class QtClock:
             to_ui=ui.post,
             on_ready=self._prayers_ready,
         )
-        self.routines = routines_mod.Runner(self.s, on_status=self._routine_status)
+        self.routines = routines_mod.Runner(
+            self.s, on_status=self._routine_status, on_warn=self._adhan_warning)
 
         self.card = CardWindow(self)
         self.scale = self.card.devicePixelRatio() if self.card.devicePixelRatio() else 1.0
@@ -811,6 +812,36 @@ class QtClock:
                 dialog.refresh_routine_status()
             except Exception:
                 log.debug("could not show the routine status", exc_info=True)
+
+    def _adhan_warning(self, item, kinds: list, seconds_left: int) -> None:
+        """A prayer's routine, speaker or local playback is about to fire.
+
+        No buttons on a tray balloon, so this is informational; Stop the adhan on the
+        tray/right-click menu (menu.py) is what actually reaches stop_now() on Qt.
+        """
+        ui.post(lambda: self._notify(alerts.Fired(
+            kind="adhan", title="%s adhan" % item.name,
+            detail="%s, in about %ds. Right-click the tray icon to stop it." % (
+                self._adhan_detail(kinds), max(0, round(seconds_left))),
+            key="adhan:%s" % item.key,
+        )))
+
+    def _adhan_detail(self, kinds: list) -> str:
+        where = []
+        if routines_mod.LOCAL in kinds:
+            where.append("here")
+        if routines_mod.CAST in kinds:
+            device = str(self.s.get("prayer_cast_device") or "").strip()
+            where.append("on %s" % device if device else "on the speaker")
+        text = "Playing %s" % " and ".join(where) if where else ""
+        if routines_mod.HOOK in kinds:
+            text = "%s, and calling a routine" % text if text else "Calling a routine"
+        return text or "Playing"
+
+    def stop_adhan(self) -> None:
+        """The tray/right-click menu's Stop -- the only way to reach it on Qt, since a tray
+        balloon has no button of its own."""
+        self.routines.stop_now()
 
     def _notify(self, fired) -> None:
         kind = {"meeting": "Meeting", "alarm": "Alarm", "timer": "Timer"}.get(fired.kind, "Floating Clock")

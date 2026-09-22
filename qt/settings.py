@@ -403,6 +403,8 @@ class SettingsDialog(QtWidgets.QDialog):
                      lambda v: self.s.__setitem__("prayer_lead_minutes", int(v)))
         self._slider(g, "Show on the clock this long before", "prayer_show_minutes",
                      0, 720, 5, lambda v: self.s.__setitem__("prayer_show_minutes", int(v)))
+        self._slider(g, "Warn this many seconds before it plays (0 off)", "prayer_warn_seconds",
+                     0, 30, 1, lambda v: self.s.__setitem__("prayer_warn_seconds", int(v)))
 
         g = self._group(body, "Today")
         self.prayer_list = QtWidgets.QListWidget()

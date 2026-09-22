@@ -118,6 +118,49 @@ def _finish_in_background(wait, cleanup) -> None:
     threading.Thread(target=work, name="floating-clock-local-adhan-wait", daemon=True).start()
 
 
+# --- stopping whatever is playing --------------------------------------------------------------
+# The clock plays at most one adhan of its own at a time in practice, so one slot is enough: the
+# most recently started play() is the one stop() acts on. A play() that starts while an earlier
+# one is still going simply becomes the new slot -- the old one is left to finish on its own,
+# same as it would be if nothing here ever called stop() at all.
+_lock = threading.Lock()
+_current = None
+
+
+class _Handle:
+    def __init__(self, stopper) -> None:
+        self._stopper = stopper
+
+
+def _register(stopper):
+    global _current
+    handle = _Handle(stopper)
+    with _lock:
+        _current = handle
+    return handle
+
+
+def _unregister(handle) -> None:
+    global _current
+    with _lock:
+        if _current is handle:
+            _current = None
+
+
+def stop() -> str:
+    """Stop whatever play() most recently started here. Empty when that succeeded, or when
+    nothing here is playing -- asking to stop silence is not a problem -- else what went wrong."""
+    with _lock:
+        handle = _current
+    if handle is None:
+        return ""
+    try:
+        handle._stopper()
+    except Exception as exc:
+        return _short(exc)
+    return ""
+
+
 # --- Windows: MCI --------------------------------------------------------------------------------
 class MciError(Exception):
     """One MCI command failed. The message is what Windows itself says went wrong."""
@@ -157,12 +200,15 @@ def _play_windows(path: str, volume, cleanup, dll=None, sleep=time.sleep) -> str
         _mci_close(alias, dll)
         return _short(exc)
 
+    handle = _register(lambda: _mci("stop %s" % alias, dll))
+
     def wait() -> None:
         try:
             while _mci("status %s mode" % alias, dll).strip().lower() == "playing":
                 sleep(POLL_S)
         finally:
             _mci_close(alias, dll)
+            _unregister(handle)
 
     _finish_in_background(wait, cleanup)
     return ""
@@ -185,7 +231,15 @@ def _play_macos(path: str, volume, cleanup, popen=subprocess.Popen) -> str:
         proc = popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         return _short(exc)
-    _finish_in_background(proc.wait, cleanup)
+    handle = _register(proc.terminate)
+
+    def wait() -> None:
+        try:
+            proc.wait()
+        finally:
+            _unregister(handle)
+
+    _finish_in_background(wait, cleanup)
     return ""
 
 
@@ -214,7 +268,15 @@ def _play_linux(path: str, volume, cleanup, which=shutil.which, popen=subprocess
         proc = popen(_linux_command(name, path, volume), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         return _short(exc)
-    _finish_in_background(proc.wait, cleanup)
+    handle = _register(proc.terminate)
+
+    def wait() -> None:
+        try:
+            proc.wait()
+        finally:
+            _unregister(handle)
+
+    _finish_in_background(wait, cleanup)
     return ""
 
 

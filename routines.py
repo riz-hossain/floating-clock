@@ -1,17 +1,27 @@
-"""What a prayer's moment sets off: the trigger URLs, and the speaker.
+"""What a prayer's moment sets off: the trigger URLs, the speaker, and this computer itself.
 
-Iqama times move through the year, so anything set to a fixed time is right
-for about a week. Two ways out of that, and the clock offers both because the
-assistants differ:
+Iqama times move through the year, so anything set to a fixed time is right for about a week.
+Three ways out of that:
 
 - A **trigger URL**. Alexa routines can be started by a device, and a trigger
   skill turns a plain web address into one, so the routine's "when" stops
   being a time. Google has no such starter of its own, but a Home Assistant
   webhook or an IFTTT applet ends in the same plain address, so the same box
   serves either. The clock only opens the address; what happens next belongs
-  to the routine.
+  to the routine, and once it has, nothing here can reach it again.
 - A **speaker**, cast to directly (cast.py). No routine, no account, no cloud
   in the path -- the clock plays the adhan on the Nest or Chromecast itself.
+- **This computer's own speakers or headphones** (localaudio.py). No speaker
+  and no assistant needed at all.
+
+The last two are the clock's own doing, so they can be stopped once started, unlike a routine
+that has already been handed to an assistant. If asked -- prayer_warn_seconds, 0 turns it off --
+a prayer about to fire is announced this many seconds ahead, so a meeting is not interrupted by
+surprise: `on_warn` tells the host, which shows something with a way to say no. That "no" and a
+later, unprompted "stop" are the same thing here (stop_now): mark it as already fired, so it
+never starts, and ask whatever might already be running to stop. Both halves are harmless when
+there is nothing to do -- marking an already-fired prayer changes nothing, and stopping silence
+is not a problem -- so the one call serves early and late alike, without needing to know which.
 
 Both hosts own one Runner and poll it every second. All that differs between
 Tk and Qt is how a status line gets back to the settings page, which is what
@@ -22,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import cast as cast_mod, localaudio, prayer as prayer_mod
 
@@ -31,11 +41,16 @@ log = logging.getLogger(__name__)
 HOOK = "routine"
 CAST = "cast"
 LOCAL = "local"
+KINDS = (HOOK, CAST, LOCAL)
 
 # Beyond this many remembered "already done" marks, the old ones are dropped.
-# Two kinds, seven prayers, a couple of days: forty is well clear of a day's
-# worth and still small enough that the set never grows without bound.
-KEEP_MARKS = 40
+# Three kinds, seven prayers, a couple of days: sixty is well clear of a
+# day's worth and still small enough that the set never grows without bound.
+KEEP_MARKS = 60
+# How long "stop" stays offered after a prayer was last warned about or fired: a guess, since
+# the clock does not track exactly when a cast or a local file finishes playing, generous enough
+# to cover a normal adhan comfortably without leaving the option to stop something forever.
+STOP_WINDOW_S = 300.0
 
 
 def media_table(settings, prefix: str = "prayer_cast") -> dict:
@@ -58,13 +73,20 @@ def media_table(settings, prefix: str = "prayer_cast") -> dict:
 class Runner:
     """Fires each prayer's routine and cast as its moment arrives."""
 
-    def __init__(self, settings: dict, on_status=None) -> None:
+    def __init__(self, settings: dict, on_status=None, on_warn=None) -> None:
         self.s = settings
         # on_status(kind, text) -- the host marshals to its own UI thread.
         self.on_status = on_status or (lambda kind, text: None)
+        # on_warn(item, kinds, seconds_left) -- a prayer is about to fire; the host shows
+        # something with a way to say no. Called once per prayer, however many kinds are due.
+        self.on_warn = on_warn or (lambda item, kinds, seconds_left: None)
         self.status = {HOOK: "", CAST: "", LOCAL: ""}
         # One set for all three kinds; hook_key's prefix keeps them apart.
         self._fired: set[str] = set()
+        self._warned: set[str] = set()          # item.key -> already warned about today
+        # item.key -> (item, until) for whatever a warning or a firing said "stop" could still
+        # reach; stop_now() acts on all of these and clears them, poll() drops the stale ones.
+        self._pending: dict[str, tuple] = {}
 
     # --- the loop ----------------------------------------------------------
     def poll(self, prayers, now: datetime) -> None:
@@ -74,6 +96,7 @@ class Runner:
         prayers = list(prayers or ())
         if not prayers:
             return
+        self._warn_due(prayers, now)
         if self.s.get("prayer_routines_enabled", False):
             self._fire_due(prayers, now, HOOK,
                            self.s.get("prayer_routines_lead_minutes", 10),
@@ -91,6 +114,10 @@ class Runner:
                            self.fire_local)
         if len(self._fired) > KEEP_MARKS:
             self._fired = prayer_mod.prune_keys(self._fired, now)
+        if len(self._warned) > KEEP_MARKS:
+            self._warned = prayer_mod.prune_keys(self._warned, now)
+        if self._pending:
+            self._pending = {k: v for k, v in self._pending.items() if v[1] > now}
 
     def _fire_due(self, prayers, now, kind, lead, table, fire) -> None:
         try:
@@ -103,7 +130,108 @@ class Runner:
             # eleven seconds to fail must not be started again each second in
             # between.
             self._fired.add(prayer_mod.hook_key(item, kind))
+            if kind in (CAST, LOCAL):
+                # A routine, once fired, is out of reach; a cast or a local
+                # play is this clock's own doing and can still be stopped.
+                self._remember(item, now)
             fire(item.name, value)
+
+    # --- warning ahead of a prayer, and stopping it, early or late ---------
+    def _kind_config(self, kind: str) -> tuple:
+        """(enabled, lead_minutes, table) for one kind."""
+        if kind == HOOK:
+            return (bool(self.s.get("prayer_routines_enabled", False)),
+                    self.s.get("prayer_routines_lead_minutes", 10),
+                    self.s.get("prayer_routines_hooks") or {})
+        if kind == CAST:
+            return (bool(self.s.get("prayer_cast_enabled", False)),
+                    self.s.get("prayer_cast_lead_minutes", 10),
+                    media_table(self.s, "prayer_cast"))
+        return (bool(self.s.get("prayer_local_enabled", False)),
+                self.s.get("prayer_local_lead_minutes", 10),
+                media_table(self.s, "prayer_local"))
+
+    def _due_kinds(self, item) -> list:
+        """[(kind, moment)] for every kind that would actually fire for this prayer."""
+        found = []
+        for kind in KINDS:
+            enabled, lead, table = self._kind_config(kind)
+            if not enabled or not prayer_mod.hook_for(item.name, table):
+                continue
+            try:
+                lead = float(lead)
+            except (TypeError, ValueError):
+                lead = 10.0
+            found.append((kind, item.iqama - timedelta(minutes=lead)))
+        return found
+
+    def _warn_due(self, prayers, now: datetime) -> None:
+        try:
+            warn_s = float(self.s.get("prayer_warn_seconds", 10) or 0)
+        except (TypeError, ValueError):
+            warn_s = 0.0
+        if warn_s <= 0:
+            return
+        for item in prayers:
+            if item.key in self._warned:
+                continue
+            due = self._due_kinds(item)
+            if not due:
+                continue
+            soonest = min(moment for _kind, moment in due)
+            until = (soonest - now).total_seconds()
+            if 0 <= until <= warn_s:
+                self._warned.add(item.key)
+                self._remember(item, now)
+                try:
+                    self.on_warn(item, [kind for kind, _m in due], round(until))
+                except Exception:
+                    log.debug("could not warn about %s", item.name, exc_info=True)
+
+    def _remember(self, item, now: datetime) -> None:
+        """This prayer's occurrence is now something stop_now() should act on."""
+        self._pending[item.key] = (item, now + timedelta(seconds=STOP_WINDOW_S))
+
+    def stoppable(self):
+        """The soonest prayer stop_now() would act on, or None."""
+        if not self._pending:
+            return None
+        return min((item for item, _until in self._pending.values()), key=lambda p: p.iqama)
+
+    def stop_now(self) -> None:
+        """Say no to whatever is pending: prevent it firing if it has not, stop it if it has.
+
+        Safe to call with nothing pending -- marking an already-fired prayer changes nothing,
+        and cast.stop/localaudio.stop are themselves safe to call on silence.
+        """
+        if not self._pending:
+            return
+        for item, _until in list(self._pending.values()):
+            for kind in KINDS:
+                self._fired.add(prayer_mod.hook_key(item, kind))
+        self._pending.clear()
+        self._stop_playback()
+
+    def _stop_playback(self) -> None:
+        def work() -> None:
+            device = str(self.s.get("prayer_cast_device") or "").strip()
+            if device:
+                try:
+                    problem = cast_mod.stop(device)
+                except Exception as exc:        # sockets and discovery have sharp edges
+                    problem = _short(exc)
+                if problem:
+                    log.info("Stopping the speaker: %s", problem)
+                self._say(CAST, "Stopped." if not problem else "Could not stop the speaker: %s" % problem)
+            try:
+                problem = localaudio.stop()
+            except Exception as exc:
+                problem = _short(exc)
+            if problem:
+                log.info("Stopping local playback: %s", problem)
+            self._say(LOCAL, "Stopped." if not problem else "Could not stop here: %s" % problem)
+
+        self._work(work, "stop")
 
     def next_due(self, prayers, now: datetime):
         """(prayer, moment, kind) for whatever fires next, or None.
