@@ -28,7 +28,7 @@ SLIDE_STEPS = 12
 SLIDE_INTERVAL = 12
 
 KIND_LABEL = {"meeting": "MEETING", "alarm": "ALARM", "timer": "TIMER",
-              "prayer": "PRAYER"}
+              "prayer": "PRAYER", "adhan": "ADHAN"}
 
 
 @dataclass
@@ -82,12 +82,13 @@ def _wrap(draw, text: str, font, max_width: float, max_lines: int = 2) -> list[s
 class Toast:
     """One popup. The owner keeps them in a list and re-stacks on close."""
 
-    def __init__(self, parent: tk.Tk, fired, theme_name: str, scale: float, on_close, on_snooze):
+    def __init__(self, parent: tk.Tk, fired, theme_name: str, scale: float, on_close, on_snooze, on_stop):
         self.fired = fired
         self.theme = themes.get(theme_name)
         self.scale = scale
         self.on_close = on_close
         self.on_snooze = on_snooze
+        self.on_stop = on_stop
         self.buttons: list[Button] = []
         self._closed = False
         self._offset = 0
@@ -241,6 +242,8 @@ class Toast:
                 labels.append(("join", "Join", True))
             labels.append(("snooze", "Snooze 2m", False))
             labels.append(("dismiss", "Dismiss", False))
+        elif self.fired.kind == "adhan":
+            labels.append(("stop", "Stop", True))
         else:
             labels.append(("dismiss", "Dismiss", True))
             labels.append(("snooze", "Snooze 5m", False))
@@ -302,6 +305,8 @@ class Toast:
         elif key == "snooze":
             minutes = 2 if self.fired.kind == "meeting" else 5
             self.on_snooze(self.fired, minutes)
+        elif key == "stop":
+            self.on_stop(self.fired)
         self.close()
 
     def close(self) -> None:

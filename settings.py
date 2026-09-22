@@ -71,6 +71,10 @@ DEFAULTS: dict = {
     "prayer_masjid_name": "",
     "prayer_proxy_for": "",
     "prayer_show_minutes": 60,
+    # A routine, a speaker or this computer's own playback is announced this many seconds
+    # ahead, with a way to say no -- a meeting should not be interrupted by surprise. 0 turns
+    # the warning off; whatever is not stopped in time still plays exactly as it would have.
+    "prayer_warn_seconds": 10,
     # No assistant lets you edit a routine's time from outside, so the clock
     # fires a trigger URL instead: the routine's "when" becomes that trigger
     # rather than a time, and it stays right all year. One URL per prayer.
@@ -274,6 +278,7 @@ def sanitise(data: dict) -> dict:
         data["nudge_shake_seconds"] = min(30.0, max(0.5, float(data["nudge_shake_seconds"])))
         data["prayer_lead_minutes"] = min(60, max(0, int(data["prayer_lead_minutes"])))
         data["prayer_show_minutes"] = min(720, max(0, int(data["prayer_show_minutes"])))
+        data["prayer_warn_seconds"] = min(30, max(0, int(data["prayer_warn_seconds"])))
         data["prayer_routines_lead_minutes"] = min(
             60, max(0, int(data["prayer_routines_lead_minutes"])))
         data["prayer_cast_lead_minutes"] = min(
@@ -291,7 +296,7 @@ def sanitise(data: dict) -> dict:
                     "peek_interval_minutes", "peek_hold_seconds", "peek_zoom",
                     "peek_travel_ms", "day_start_hour", "day_end_hour",
                     "nudge_lead_minutes", "nudge_shake_seconds",
-                    "prayer_lead_minutes", "prayer_show_minutes",
+                    "prayer_lead_minutes", "prayer_show_minutes", "prayer_warn_seconds",
                     "prayer_routines_lead_minutes", "prayer_cast_lead_minutes",
                     "prayer_cast_volume", "prayer_local_lead_minutes", "prayer_local_volume"):
             data[key] = DEFAULTS[key]

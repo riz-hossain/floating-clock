@@ -269,6 +269,43 @@ def play(device: str, media: str, volume: float | None = None,
         _stop(pcc, browser)
 
 
+def stop(device: str, timeout: float = DISCOVER_TIMEOUT) -> str:
+    """Stop whatever is playing on `device` now. Empty when it was told to, else what went wrong.
+
+    play() disconnects the moment the adhan has started, so there is no open connection left to
+    reuse here -- stopping means finding the speaker again, exactly as starting did, and telling it
+    to stop. Safe to call when nothing is playing there: a speaker that is already idle just says so.
+    """
+    pcc = _pychromecast()
+    if pcc is None:
+        return NO_LIBRARY
+    device = (device or "").strip()
+    if not device:
+        return "no speaker chosen"
+    try:
+        casts, browser = pcc.get_listed_chromecasts(
+            friendly_names=[device], discovery_timeout=timeout)
+    except Exception as exc:
+        return _reason(exc)
+    try:
+        if not casts:
+            return 'no speaker called "%s" answered on this network' % device
+        speaker = casts[0]
+        try:
+            speaker.wait(timeout=CONNECT_TIMEOUT)
+            speaker.media_controller.stop()
+        except Exception as exc:
+            return _reason(exc)
+        finally:
+            try:
+                speaker.disconnect(blocking=False)
+            except Exception:
+                log.debug("could not close the speaker connection", exc_info=True)
+        return ""
+    finally:
+        _stop(pcc, browser)
+
+
 def _stop(pcc, browser) -> None:
     try:
         pcc.discovery.stop_discovery(browser)

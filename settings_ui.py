@@ -105,6 +105,12 @@ HOUR_CHOICES = [_hour_label(h) for h in HOUR_STEPS]
 HOUR_BY_LABEL = {_hour_label(h): h for h in HOUR_STEPS}
 
 
+def _seconds_label(seconds) -> str:
+    """0 -> 'off'; otherwise 'N s'."""
+    seconds = int(seconds)
+    return "off" if seconds <= 0 else "%d s" % seconds
+
+
 def _minutes_label(minutes) -> str:
     """0 -> 'on time'; 90 -> '1 h 30 min'. A slider that reads in hours once
     it is past one saves counting zeroes."""
@@ -812,6 +818,13 @@ class SettingsUI(CalendarsPage):
         self._slider_row(
             card, "Show on the clock within", 0, 240, self.prayer_show_var, _minutes_label,
             self._set_prayer_window, step=5,
+        )
+        self.prayer_warn_var = tk.IntVar(value=int(self.s.get("prayer_warn_seconds", 10)))
+        self._slider_row(
+            card, "Warn before it plays", 0, 30, self.prayer_warn_var, _seconds_label,
+            lambda v: self.s.__setitem__("prayer_warn_seconds", int(v)),
+            caption="However it plays -- a routine, a speaker, or here -- this long a chance "
+                    "to say not now, so a meeting is not interrupted by surprise. Off stops nothing.",
         )
         slot = self._control_row(
             card, "Masjid",

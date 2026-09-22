@@ -37,6 +37,11 @@ def build_menu(clock, persistent: bool = False) -> QtWidgets.QMenu:
 def _fill(menu: QtWidgets.QMenu, clock) -> None:
     menu.clear()
     s = clock.s
+    # Stopping an adhan, when one is due or playing, comes before everything else: it is urgent
+    # in a way nothing else on this menu is, and it is not always there.
+    stopping = clock.routines.stoppable()
+    if stopping is not None:
+        _action(menu, "Stop %s's adhan" % stopping.name, clock.stop_adhan)
     _action(menu, "Today's meetings", clock.toggle_meetings)
     _action(menu, "Settings…", clock.open_settings)
     menu.addSeparator()

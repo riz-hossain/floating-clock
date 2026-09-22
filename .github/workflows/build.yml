@@ -151,6 +151,14 @@ jobs:
           PYTHONPATH: stage
           QT_QPA_PLATFORM: offscreen
         run: python packaging/check-qt-slider.py
+      - name: Stopping the adhan, on the tray menu
+        # A tray balloon has no button of its own, so the menu's "Stop <prayer>'s adhan" --
+        # offered only while one is due or playing -- is what actually reaches it on Mac and
+        # Linux; the warning notification itself is informational.
+        env:
+          PYTHONPATH: stage
+          QT_QPA_PLATFORM: offscreen
+        run: python packaging/check-qt-adhan-warning.py
 
   macos:
     name: macOS (${{ matrix.label }})
