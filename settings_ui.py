@@ -252,12 +252,12 @@ class SettingsUI(CalendarsPage):
         """Hook for app.py (re-reads the configured calendars)."""
 
     def _settings_wheel(self, event):
+        # A control the pointer is over gets first refusal on the wheel (a Slider takes it
+        # once it has been clicked; see widgets.Slider._wheel) and its binding returns
+        # "break" to keep the page still while it does. Reaching here means nothing wanted
+        # it, so the page scrolls.
         scroll = getattr(self, "_scroll", None)
         if scroll is None or not scroll.winfo_exists():
-            return None
-        # A slider under the pointer takes the wheel for itself.
-        under = event.widget if isinstance(event.widget, tk.Misc) else None
-        if isinstance(under, w.Slider):
             return None
         return scroll.wheel(event)
 

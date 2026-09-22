@@ -128,6 +128,14 @@ jobs:
           PYTHONPATH: stage
           QT_QPA_PLATFORM: offscreen
         run: python packaging/check-qt-threads.py
+      - name: A slider needs a click before the wheel touches it
+        # Left to QSlider's own wheelEvent, scrolling a settings page full of them
+        # silently changes whichever one the pointer happens to be over instead of
+        # scrolling past it.
+        env:
+          PYTHONPATH: stage
+          QT_QPA_PLATFORM: offscreen
+        run: python packaging/check-qt-slider.py
 
   macos:
     name: macOS (${{ matrix.label }})

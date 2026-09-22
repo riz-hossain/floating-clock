@@ -72,6 +72,36 @@ def stylesheet(p: pal.Palette) -> str:
                accent=p.accent, on_accent=p.on_accent, danger=p.danger, trough=p.trough, disabled=p.disabled)
 
 
+class _Slider(QtWidgets.QSlider):
+    """A horizontal slider that only takes the mouse wheel once it has been clicked.
+
+    Left as a plain QSlider it takes the wheel from the moment the pointer crosses it,
+    which is exactly the trap a settings page full of sliders sets: scroll down the page
+    and whichever one the pointer happens to be over silently changes instead of letting
+    the page scroll. Click it first (which also gives it focus, the usual Qt way to ask
+    for keyboard/wheel input) and the wheel is hers until the pointer leaves again, so a
+    slider clicked once does not keep eating the wheel for the rest of the session.
+    """
+
+    def __init__(self, *a, **kw) -> None:
+        super().__init__(*a, **kw)
+        self._engaged = False
+
+    def mousePressEvent(self, event) -> None:
+        self._engaged = True
+        super().mousePressEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._engaged = False
+        super().leaveEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        if self._engaged:
+            super().wheelEvent(event)
+        else:
+            event.ignore()          # not hers: let the scroll area underneath have it
+
+
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, clock) -> None:
         super().__init__(None)
@@ -161,7 +191,7 @@ class SettingsDialog(QtWidgets.QDialog):
         label = QtWidgets.QLabel(text)
         value = QtWidgets.QLabel()
         value.setObjectName("muted")
-        slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        slider = _Slider(QtCore.Qt.Orientation.Horizontal)
         scale = 1 if integer else 100
         slider.setRange(int(low * scale), int(high * scale))
         slider.setSingleStep(int(step * scale))

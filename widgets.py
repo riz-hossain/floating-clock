@@ -408,7 +408,12 @@ class Switch(tk.Label):
 
 
 class Slider(tk.Canvas):
-    """A horizontal slider. `command` gets the new value as a number."""
+    """A horizontal slider. `command` gets the new value as a number.
+
+    Click-and-drag sets it directly. The wheel nudges it by one step too, but only
+    once it has been clicked -- see _wheel -- so that scrolling past one on a page
+    full of them does not silently change it.
+    """
 
     H = 28
     THUMB = 20
@@ -425,6 +430,7 @@ class Slider(tk.Canvas):
         self._bg = bg or parent.cget("bg")
         self._hot = False
         self._dragging = False
+        self._armed = False   # the wheel only touches it after a click; see _wheel
         super().__init__(
             parent, height=ui.px(self.H), bg=self._bg, bd=0, highlightthickness=0,
             cursor="hand2",
@@ -438,7 +444,7 @@ class Slider(tk.Canvas):
         self.bind("<B1-Motion>", self._drag)
         self.bind("<ButtonRelease-1>", self._release)
         self.bind("<Enter>", lambda _e: self._set_hot(True))
-        self.bind("<Leave>", lambda _e: self._set_hot(False))
+        self.bind("<Leave>", self._leave)
         self.bind("<MouseWheel>", self._wheel)
         self._trace = variable.trace_add("write", lambda *_: self._layout())
         self.bind("<Destroy>", self._on_destroy)
@@ -485,6 +491,13 @@ class Slider(tk.Canvas):
         self._hot = hot
         self._layout()
 
+    def _leave(self, _event) -> None:
+        # Off it again means a fresh click is needed before the wheel touches it once more --
+        # otherwise a slider clicked once, anywhere on the page, keeps eating the wheel for the
+        # rest of the session every time the pointer happens to cross it again.
+        self._armed = False
+        self._set_hot(False)
+
     # input
     def _value_at(self, x: int):
         w = self.winfo_width()
@@ -508,6 +521,7 @@ class Slider(tk.Canvas):
 
     def _press(self, event) -> None:
         self._dragging = True
+        self._armed = True    # clicked: the wheel is now hers until the pointer leaves
         self._apply(self._value_at(event.x))
 
     def _drag(self, event) -> None:
@@ -517,7 +531,16 @@ class Slider(tk.Canvas):
         self._dragging = False
         self._layout()
 
-    def _wheel(self, event) -> str:
+    def _wheel(self, event) -> str | None:
+        """Nudge the value, but only once the slider has been clicked.
+
+        Left to itself the wheel would change whatever slider the pointer happens to be
+        crossing on its way down the page -- every settings page is full of them. Returning
+        None here, unarmed, lets the event carry on up to whatever would otherwise scroll
+        the page; a page-level handler routes it once the slider has said it does not want it.
+        """
+        if not self._armed:
+            return None
         direction = 1 if event.delta > 0 else -1
         self._apply(self._snap(float(self.variable.get()) + direction * self.step))
         return "break"
