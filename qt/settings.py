@@ -17,7 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import json
 
 from .. import (
-    alerts, caldav, cast as cast_mod, google_oauth, ics, orgs as orgs_mod,
+    alerts, caldav, cast as cast_mod, google_oauth, ics, localaudio, orgs as orgs_mod,
     masjids as masjids_mod, palette as pal, pickerflow as flow, prayer as prayer_mod, providers, render,
     routines as routines_mod, settings as cfg, themes, timeline, vault, whereami,
 )
@@ -38,6 +38,12 @@ ROUTINE_ROW_NOTES = {
                "the assistant's own sunset trigger is the one to use for it.",
 }
 CAST_ROW_NOTES = {
+    "Dhuhr": "Friday's Jumuah uses this one too.",
+    "Maghrib": "Maghrib is called at sunset, a few minutes before the iqama here, so "
+               "playing early against the iqama would call it before sunset.",
+}
+# Same sunset problem as the speaker card, same advice.
+LOCAL_ROW_NOTES = {
     "Dhuhr": "Friday's Jumuah uses this one too.",
     "Maghrib": "Maghrib is called at sunset, a few minutes before the iqama here, so "
                "playing early against the iqama would call it before sunset.",
@@ -493,6 +499,47 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cast_status.setWordWrap(True)
         g.addWidget(self.cast_status)
 
+        # --- playing the adhan here, no speaker or assistant needed ---
+        g = self._group(
+            body, "Play on this computer",
+            "No speaker and no assistant: the clock plays the adhan itself, through "
+            "whatever this Mac's own speakers or headphones are -- exactly what "
+            "there still is when travelling with just the laptop. Nothing to link, no "
+            "skill, no network, no other device. The audio is your own file or link, "
+            "the same as the speaker card. This Mac has to be awake for it to play.")
+        self._check(g, "Play the adhan here at each prayer", "prayer_local_enabled",
+                    repaint=False)
+        self._slider(g, "Play this long before iqama", "prayer_local_lead_minutes", 0, 60, 1,
+                     lambda v: self.s.__setitem__("prayer_local_lead_minutes", int(v)))
+        self._slider(g, "Volume", "prayer_local_volume", 0.0, 1.0, 0.05,
+                     lambda v: self.s.__setitem__("prayer_local_volume", float(v)),
+                     integer=False)
+
+        self.local_media_fields = {}
+        for name, caption, note in (
+            ("", "Adhan", "Used for every prayer unless one below says otherwise."),
+        ) + tuple((n, n, LOCAL_ROW_NOTES.get(n, "")) for n in prayer_mod.DAILY):
+            row = QtWidgets.QHBoxLayout()
+            row.addWidget(self._row_label(caption, note))
+            initial = (str(self.s.get("prayer_local_media_default") or "") if not name
+                       else str((self.s.get("prayer_local_media") or {}).get(name) or ""))
+            field = QtWidgets.QLineEdit(initial)
+            field.setPlaceholderText("a file, or https://…" if not name else "same as above")
+            field.editingFinished.connect(lambda n=name: self._set_local_media(n))
+            self.local_media_fields[name] = field
+            row.addWidget(field, 1)
+            choose = QtWidgets.QPushButton("Choose…")
+            choose.clicked.connect(lambda _c=False, n=name: self._choose_local_file(n))
+            row.addWidget(choose)
+            test = QtWidgets.QPushButton("Test")
+            test.clicked.connect(lambda _c=False, n=name: self._test_local(n))
+            row.addWidget(test)
+            g.addLayout(row)
+        self.local_status = QtWidgets.QLabel("")
+        self.local_status.setObjectName("muted")
+        self.local_status.setWordWrap(True)
+        g.addWidget(self.local_status)
+
         self.refresh_prayer_page()
         self.refresh_routine_status()
 
@@ -550,6 +597,9 @@ class SettingsDialog(QtWidgets.QDialog):
         label = getattr(self, "cast_status", None)
         if label is not None:
             label.setText(status.get(routines_mod.CAST) or self._cast_summary())
+        label = getattr(self, "local_status", None)
+        if label is not None:
+            label.setText(status.get(routines_mod.LOCAL) or self._local_summary())
 
     def _routine_summary(self) -> str:
         hooks = self.s.get("prayer_routines_hooks") or {}
@@ -565,7 +615,7 @@ class SettingsDialog(QtWidgets.QDialog):
         if problem:
             return problem
         device = str(self.s.get("prayer_cast_device") or "").strip()
-        table = routines_mod.media_table(self.s)
+        table = routines_mod.media_table(self.s, "prayer_cast")
         if not device:
             return "No speaker chosen."
         if not table:
@@ -573,6 +623,17 @@ class SettingsDialog(QtWidgets.QDialog):
         if not self.s.get("prayer_cast_enabled", False):
             return "%s is set up, switched off." % device
         return "Ready: %s on %s." % (", ".join(sorted(table)), device)
+
+    def _local_summary(self) -> str:
+        problem = localaudio.available()
+        if problem:
+            return problem
+        table = routines_mod.media_table(self.s, "prayer_local")
+        if not table:
+            return "No adhan chosen."
+        if not self.s.get("prayer_local_enabled", False):
+            return "%d adhan(s) saved, switched off." % len(table)
+        return "Ready: %s." % ", ".join(sorted(table))
 
     # --- trigger URLs ------------------------------------------------------------
     def _set_routine_hook(self, name: str) -> None:
@@ -707,7 +768,7 @@ class SettingsDialog(QtWidgets.QDialog):
     def _test_cast(self, name: str) -> None:
         self._set_cast_media(name)
         self._set_cast_device()
-        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s))
+        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s, "prayer_cast"))
                  if name else str(self.s.get("prayer_cast_media_default") or "").strip())
         if not media:
             self.cast_status.setText("Choose the audio first.")
@@ -717,6 +778,61 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         self.cast_status.setText("Starting on %s…" % self.s["prayer_cast_device"])
         self.clock.routines.fire_cast(name or "Adhan", media)
+
+    # --- playing the adhan here, no speaker or assistant needed ------------------
+    def _set_local_media(self, name: str) -> None:
+        """Save one prayer's adhan -- or, for "", the one every prayer uses."""
+        field = self.local_media_fields.get(name)
+        if field is None:
+            return
+        media = field.text().strip()
+        if media:
+            problem = cast_mod.check_media(media)
+            if problem:
+                self.local_status.setText("%s: %s" % (name or "Adhan", problem))
+                return
+        if not name:
+            if media == str(self.s.get("prayer_local_media_default") or ""):
+                return
+            self.s["prayer_local_media_default"] = media
+        else:
+            table = dict(self.s.get("prayer_local_media") or {})
+            if media == str(table.get(name) or ""):
+                return
+            if media:
+                table[name] = media
+            else:
+                table.pop(name, None)
+            self.s["prayer_local_media"] = table
+        cfg.save(self.s)
+        self.local_status.setText(
+            "%s adhan saved." % (name or "Default") if media
+            else "%s adhan cleared." % (name or "Default"))
+
+    def _choose_local_file(self, name: str) -> None:
+        chosen, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Choose the adhan to play" if not name else "Choose %s's adhan" % name,
+            "", "Audio (*.mp3 *.m4a *.aac *.wav *.ogg *.flac);;All files (*)")
+        if not chosen:
+            return
+        field = self.local_media_fields.get(name)
+        if field is not None:
+            field.setText(chosen)
+            self._set_local_media(name)
+
+    def _test_local(self, name: str) -> None:
+        self._set_local_media(name)
+        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s, "prayer_local"))
+                 if name else str(self.s.get("prayer_local_media_default") or "").strip())
+        if not media:
+            self.local_status.setText("Choose the audio first.")
+            return
+        problem = localaudio.available()
+        if problem:
+            self.local_status.setText(problem)
+            return
+        self.local_status.setText("Starting here…")
+        self.clock.routines.fire_local(name or "Adhan", media)
 
     def _page_alarms(self, body) -> None:
         g = self._group(body, "Alarms", "Type a time such as 7:30, 07:30 or 7:30 pm.")

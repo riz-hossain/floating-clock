@@ -23,7 +23,10 @@ from . import (
     settings as cfg, themes, widgets as w, win32util as w32,
 )
 from . import __version__
-from . import cast as cast_mod, masjids as masjids_mod, pickerflow as flow, routines as routines_mod, timeline, whereami
+from . import (
+    cast as cast_mod, localaudio, masjids as masjids_mod, pickerflow as flow,
+    routines as routines_mod, timeline, whereami,
+)
 from .timetext import clock_text, parse_clock_time
 from .calendars_ui import CalendarsPage
 
@@ -66,6 +69,12 @@ ROUTINE_ROW_NOTES = {
 # The speaker has the same sunset problem and no sunset trigger to fall back
 # on, so the honest advice differs: give Maghrib its own lead, or leave it out.
 CAST_ROW_NOTES = {
+    "Dhuhr": "Friday's Jumuah uses this one too.",
+    "Maghrib": "Maghrib is called at sunset, a few minutes before the iqama here, so "
+               "playing early against the iqama would call it before sunset.",
+}
+# Same sunset problem as the speaker card, same advice.
+LOCAL_ROW_NOTES = {
     "Dhuhr": "Friday's Jumuah uses this one too.",
     "Maghrib": "Maghrib is called at sunset, a few minutes before the iqama here, so "
                "playing early against the iqama would call it before sunset.",
@@ -974,6 +983,77 @@ class SettingsUI(CalendarsPage):
             card.body, ui, "", 9, colour=ui.p.muted, wraplength=ui.px(520), justify="left",
         )
         self.cast_status_label.pack(anchor="w", pady=(ui.px(8), 0))
+
+        card = self._card(
+            page, "Play on this computer",
+            "No speaker and no assistant: the clock plays the adhan itself, through "
+            "whatever this computer's own speakers or headphones are -- exactly what "
+            "there still is when travelling with just the laptop. Nothing to link, no "
+            "skill, no network, no other device. The audio is your own file or link, "
+            "the same as the speaker card. This computer has to be awake for it to play.",
+        )
+        self.var_local = tk.BooleanVar(value=bool(self.s.get("prayer_local_enabled", False)))
+        self._switch_row(
+            card, "Play the adhan here at each prayer", self.var_local,
+            lambda: self._toggle("prayer_local_enabled", self.var_local),
+        )
+        self.local_lead_var = tk.IntVar(value=int(self.s.get("prayer_local_lead_minutes", 10)))
+        self._slider_row(
+            card, "Play this long before iqama", 0, 60, self.local_lead_var, _minutes_label,
+            lambda v: self.s.__setitem__("prayer_local_lead_minutes", int(v)),
+        )
+        self.local_volume_var = tk.IntVar(
+            value=int(round(float(self.s.get("prayer_local_volume", 0.6)) * 100)))
+        self._slider_row(
+            card, "Volume", 0, 100, self.local_volume_var, "%d%%",
+            lambda v: self.s.__setitem__("prayer_local_volume", int(v) / 100.0),
+            caption="Not every format on every system can be set from here; where it "
+                    "cannot, this is left at whatever the system is already playing at.",
+        )
+
+        slot = self._control_row(
+            card, "Adhan", "Used for every prayer unless one below says otherwise.")
+        self.local_media_fields = {}
+        field = w.Field(
+            slot, ui, width=22,
+            initial=str(self.s.get("prayer_local_media_default") or ""),
+            placeholder="a file, or https://…")
+        field.pack(side="left")
+        self.local_media_fields[""] = field
+        field.entry.bind("<FocusOut>", lambda _e: self._set_local_media(""))
+        field.entry.bind("<Return>", lambda _e: self._set_local_media(""))
+        self._on_close_save(lambda: self._set_local_media(""))
+        w.Button(
+            slot, ui, "Choose…", command=lambda: self._choose_local_file(""),
+            kind="quiet", padx=10, height=28,
+        ).pack(side="left", padx=(ui.px(6), 0))
+        w.Button(
+            slot, ui, "Test", command=lambda: self._test_local(""),
+            kind="quiet", padx=10, height=28,
+        ).pack(side="left", padx=(ui.px(6), 0))
+
+        media = self.s.get("prayer_local_media") or {}
+        for name in prayer_mod.DAILY:
+            slot = self._control_row(card, name, LOCAL_ROW_NOTES.get(name, ""))
+            field = w.Field(slot, ui, width=22, initial=str(media.get(name) or ""),
+                            placeholder="same as above")
+            field.pack(side="left")
+            self.local_media_fields[name] = field
+            field.entry.bind("<FocusOut>", lambda _e, n=name: self._set_local_media(n))
+            field.entry.bind("<Return>", lambda _e, n=name: self._set_local_media(n))
+            self._on_close_save(lambda n=name: self._set_local_media(n))
+            w.Button(
+                slot, ui, "Choose…", command=lambda n=name: self._choose_local_file(n),
+                kind="quiet", padx=10, height=28,
+            ).pack(side="left", padx=(ui.px(6), 0))
+            w.Button(
+                slot, ui, "Test", command=lambda n=name: self._test_local(n),
+                kind="quiet", padx=10, height=28,
+            ).pack(side="left", padx=(ui.px(6), 0))
+        self.local_status_label = w.label(
+            card.body, ui, "", 9, colour=ui.p.muted, wraplength=ui.px(520), justify="left",
+        )
+        self.local_status_label.pack(anchor="w", pady=(ui.px(8), 0))
         self._refresh_prayer_page()
 
     # --- finding a masjid --------------------------------------------------
@@ -1493,7 +1573,7 @@ class SettingsUI(CalendarsPage):
         """Play it now, so the speaker and the file can be proved together."""
         self._set_cast_media(name)
         self._set_cast_device()
-        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s))
+        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s, "prayer_cast"))
                  if name else str(self.s.get("prayer_cast_media_default") or "").strip())
         if not media:
             self._cast_note("Choose the audio first.")
@@ -1505,6 +1585,78 @@ class SettingsUI(CalendarsPage):
         if fire is None:
             return
         self._cast_note("Starting on %s…" % self.s["prayer_cast_device"])
+        fire(name or "Adhan", media)
+
+    # --- playing the adhan here, no speaker or assistant needed ------------
+    def _local_note(self, text: str) -> None:
+        label = getattr(self, "local_status_label", None)
+        if label is not None and label.winfo_exists():
+            label.configure(text=text)
+
+    def _local_field(self, name: str):
+        return (getattr(self, "local_media_fields", None) or {}).get(name)
+
+    def _set_local_media(self, name: str) -> None:
+        """Save one prayer's adhan -- or, for "", the one every prayer uses."""
+        field = self._local_field(name)
+        if field is None or not field.winfo_exists():
+            return
+        media = field.get().strip()
+        if media:
+            problem = cast_mod.check_media(media)
+            if problem:
+                self._local_note("%s: %s" % (name or "Adhan", problem))
+                return
+        if not name:
+            if media == str(self.s.get("prayer_local_media_default") or ""):
+                return
+            self.s["prayer_local_media_default"] = media
+        else:
+            table = dict(self.s.get("prayer_local_media") or {})
+            if media == str(table.get(name) or ""):
+                return
+            if media:
+                table[name] = media
+            else:
+                table.pop(name, None)
+            self.s["prayer_local_media"] = table
+        cfg.save(self.s)
+        self._local_note(
+            "%s adhan saved." % (name or "Default") if media
+            else "%s adhan cleared." % (name or "Default"))
+
+    def _choose_local_file(self, name: str) -> None:
+        from tkinter import filedialog
+
+        chosen = filedialog.askopenfilename(
+            parent=self._settings_win,
+            title="Choose the adhan to play" if not name else "Choose %s's adhan" % name,
+            filetypes=[("Audio", "*.mp3 *.m4a *.aac *.wav *.ogg *.flac"),
+                       ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+        field = self._local_field(name)
+        if field is not None and field.winfo_exists():
+            field.set(chosen)
+            self._set_local_media(name)
+
+    def _test_local(self, name: str) -> None:
+        """Play it now, on this computer, so the file can be proved on its own."""
+        self._set_local_media(name)
+        media = (prayer_mod.hook_for(name, routines_mod.media_table(self.s, "prayer_local"))
+                 if name else str(self.s.get("prayer_local_media_default") or "").strip())
+        if not media:
+            self._local_note("Choose the audio first.")
+            return
+        problem = localaudio.available()
+        if problem:
+            self._local_note(problem)
+            return
+        fire = getattr(self, "fire_local", None)
+        if fire is None:
+            return
+        self._local_note("Starting here…")
         fire(name or "Adhan", media)
 
     def _toggle_prayer(self) -> None:
@@ -1588,6 +1740,9 @@ class SettingsUI(CalendarsPage):
         label = getattr(self, "cast_status_label", None)
         if label is not None and label.winfo_exists() and not label.cget("text"):
             self._cast_note(status.get(routines_mod.CAST) or self._cast_summary())
+        label = getattr(self, "local_status_label", None)
+        if label is not None and label.winfo_exists() and not label.cget("text"):
+            self._local_note(status.get(routines_mod.LOCAL) or self._local_summary())
 
     def _routine_summary(self) -> str:
         """What the routines card says before anything has fired."""
@@ -1605,7 +1760,7 @@ class SettingsUI(CalendarsPage):
         if problem:
             return problem
         device = str(self.s.get("prayer_cast_device") or "").strip()
-        table = routines_mod.media_table(self.s)
+        table = routines_mod.media_table(self.s, "prayer_cast")
         if not device:
             return "No speaker chosen."
         if not table:
@@ -1613,6 +1768,18 @@ class SettingsUI(CalendarsPage):
         if not self.s.get("prayer_cast_enabled", False):
             return "%s is set up, switched off." % device
         return "Ready: %s on %s." % (", ".join(sorted(table)), device)
+
+    def _local_summary(self) -> str:
+        """What the "play on this computer" card says before anything has played."""
+        problem = localaudio.available()
+        if problem:
+            return problem
+        table = routines_mod.media_table(self.s, "prayer_local")
+        if not table:
+            return "No adhan chosen."
+        if not self.s.get("prayer_local_enabled", False):
+            return "%d adhan(s) saved, switched off." % len(table)
+        return "Ready: %s." % ", ".join(sorted(table))
 
     def refresh_prayers(self, force: bool = True) -> None:
         """Hook for app.py (re-reads the masjid's calendar)."""

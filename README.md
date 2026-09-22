@@ -23,9 +23,10 @@ run a Qt one — everything underneath is the same code.
   website — shows you what it found before keeping it, and rechecks every
   night. If a masjid has nothing online it can read, it offers the nearest
   one that does, clearly labelled as borrowed.
-- **Routines** — trigger an Alexa routine at each prayer, or play the adhan
-  straight on a Google or Nest speaker, right at iqama instead of a fixed
-  clock time. See [ROUTINES.md](ROUTINES.md).
+- **Routines** — trigger an Alexa routine at each prayer, play the adhan
+  straight on a Google or Nest speaker, or play it through this computer's
+  own speakers or headphones — no speaker or account needed — right at
+  iqama instead of a fixed clock time. See [ROUTINES.md](ROUTINES.md).
 - **Alarms, timers and a stopwatch**, with reminders before meetings and
   before each iqama.
 

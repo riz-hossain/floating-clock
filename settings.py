@@ -91,6 +91,14 @@ DEFAULTS: dict = {
     "prayer_cast_lead_minutes": 10,
     "prayer_cast_media_default": "",
     "prayer_cast_media": {},
+    # Neither routine needs a speaker or an account, for travelling with just the
+    # laptop: the clock plays the adhan through this computer's own speakers or
+    # headphones instead (localaudio.py). Same audio rule as the cast card.
+    "prayer_local_enabled": False,
+    "prayer_local_volume": 0.6,
+    "prayer_local_lead_minutes": 10,
+    "prayer_local_media_default": "",
+    "prayer_local_media": {},
     # Progress bar: "day" spans 24h from day_start_hour and dots each meeting,
     # "meeting" fills toward the next one, "seconds" tracks the passing minute.
     "bar_mode": "day",
@@ -251,7 +259,7 @@ def sanitise(data: dict) -> dict:
         "minimized", "compact", "calendar_enabled", "show_next_meeting", "alerts_sound", "show_timer",
         "peek_enabled", "peek_sound", "show_org_marks", "auto_org_marks",
         "nudge_enabled", "prayer_enabled", "prayer_routines_enabled",
-        "prayer_cast_enabled",
+        "prayer_cast_enabled", "prayer_local_enabled",
     ):
         data[key] = bool(data[key])
     try:
@@ -271,6 +279,9 @@ def sanitise(data: dict) -> dict:
         data["prayer_cast_lead_minutes"] = min(
             60, max(0, int(data["prayer_cast_lead_minutes"])))
         data["prayer_cast_volume"] = min(1.0, max(0.0, float(data["prayer_cast_volume"])))
+        data["prayer_local_lead_minutes"] = min(
+            60, max(0, int(data["prayer_local_lead_minutes"])))
+        data["prayer_local_volume"] = min(1.0, max(0.0, float(data["prayer_local_volume"])))
         # Quarter-hour resolution: enough for "my day ends at 11:30pm"
         # without pretending the boundary is precise to the minute.
         for key in ("day_start_hour", "day_end_hour"):
@@ -282,14 +293,14 @@ def sanitise(data: dict) -> dict:
                     "nudge_lead_minutes", "nudge_shake_seconds",
                     "prayer_lead_minutes", "prayer_show_minutes",
                     "prayer_routines_lead_minutes", "prayer_cast_lead_minutes",
-                    "prayer_cast_volume"):
+                    "prayer_cast_volume", "prayer_local_lead_minutes", "prayer_local_volume"):
             data[key] = DEFAULTS[key]
     if not isinstance(data["font_family"], str):
         data["font_family"] = DEFAULTS["font_family"]
     if not isinstance(data["theme"], str):
         data["theme"] = DEFAULTS["theme"]
     for key in ("google_client_id", "google_client_secret", "prayer_ics_url",
-                "prayer_cast_device", "prayer_cast_media_default",
+                "prayer_cast_device", "prayer_cast_media_default", "prayer_local_media_default",
                 "prayer_masjid_name", "prayer_proxy_for"):
         data[key] = str(data.get(key) or "").strip()
     for key, low, high in (("prayer_lat", -66.0, 66.0), ("prayer_lon", -180.0, 180.0)):
@@ -306,7 +317,7 @@ def sanitise(data: dict) -> dict:
     # a stray key or a number in front of the firing code.
     from .prayer import ORDER as PRAYER_NAMES
 
-    for key in ("prayer_routines_hooks", "prayer_cast_media"):
+    for key in ("prayer_routines_hooks", "prayer_cast_media", "prayer_local_media"):
         table = data.get(key)
         data[key] = {
             name: str(table[name]).strip()
