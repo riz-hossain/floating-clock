@@ -413,6 +413,9 @@ class Slider(tk.Canvas):
     Click-and-drag sets it directly. The wheel nudges it by one step too, but only
     once it has been clicked -- see _wheel -- so that scrolling past one on a page
     full of them does not silently change it.
+
+    `values`, when given, are the only stops it has, spread evenly along the
+    track, and the wheel moves one stop at a time.
     """
 
     H = 28
@@ -420,8 +423,11 @@ class Slider(tk.Canvas):
     TRACK = 4
 
     def __init__(self, parent, ui: Ui, from_, to, variable, command=None,
-                 integer: bool = True, bg: str | None = None, step=None) -> None:
+                 integer: bool = True, bg: str | None = None, step=None, values=None) -> None:
         self.ui = ui
+        self.values = tuple(values or ())
+        if self.values:
+            from_, to = self.values[0], self.values[-1]
         self.lo, self.hi = float(from_), float(to)
         self.variable = variable
         self.command = command
@@ -465,8 +471,14 @@ class Slider(tk.Canvas):
             value = float(self.variable.get())
         except (tk.TclError, ValueError):
             value = self.lo
+        if self.values:
+            return self._stop(value) / max(1, len(self.values) - 1)
         span = self.hi - self.lo or 1.0
         return max(0.0, min(1.0, (value - self.lo) / span))
+
+    def _stop(self, value: float) -> int:
+        """Which of `values` is nearest to `value`."""
+        return min(range(len(self.values)), key=lambda i: abs(self.values[i] - value))
 
     def _layout(self) -> None:
         if not self.winfo_exists():
@@ -503,10 +515,14 @@ class Slider(tk.Canvas):
         w = self.winfo_width()
         inset = self._inset()
         fraction = max(0.0, min(1.0, (x - inset) / max(1, w - 2 * inset)))
+        if self.values:
+            return self.values[int(round(fraction * (len(self.values) - 1)))]
         value = self.lo + fraction * (self.hi - self.lo)
         return self._snap(value)
 
     def _snap(self, value: float):
+        if self.values:
+            return self.values[self._stop(value)]
         value = max(self.lo, min(self.hi, value))
         if self.integer:
             return int(round(value))
@@ -542,7 +558,11 @@ class Slider(tk.Canvas):
         if not self._armed:
             return None
         direction = 1 if event.delta > 0 else -1
-        self._apply(self._snap(float(self.variable.get()) + direction * self.step))
+        if self.values:
+            stop = self._stop(float(self.variable.get())) + direction
+            self._apply(self.values[max(0, min(len(self.values) - 1, stop))])
+        else:
+            self._apply(self._snap(float(self.variable.get()) + direction * self.step))
         return "break"
 
 

@@ -135,10 +135,12 @@ class Peek:
         self._schedule.stop()
         if not self.owner.s["peek_enabled"]:
             return
-        from ..peek import Peek as _TkPeek
+        from ..peek import seconds_until_boundary
 
-        delay = _TkPeek.next_slot_delay(self, datetime.now())   # same wall-clock slots
-        self._schedule.start(max(1000, int(delay)))
+        # The same wall-clock slots as the Tk clock's. This once called a method
+        # the Tk Peek no longer had, so start() raised before the event loop ran.
+        seconds = seconds_until_boundary(datetime.now(), float(self.owner.s["peek_interval_minutes"]))
+        self._schedule.start(max(1000, int(seconds * 1000)))
 
     def _fire(self) -> None:
         self.start()

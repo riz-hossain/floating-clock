@@ -129,6 +129,32 @@ try:
         check("moving off it and wheeling again, without a fresh click, ignores it once more",
               not ev.isAccepted() and page_slider.value() == left_value,
               "accepted=%s %s -> %s" % (ev.isAccepted(), left_value, page_slider.value()))
+
+    print("the peek interval's stops")
+    from floating_clock import settings as cfg
+
+    stops = cfg.PEEK_INTERVALS
+    found = [s for s in dialog.findChildren(_Slider) if s.maximum() == len(stops) - 1]
+    check("the peek interval is a slider of the settings' own stops, one position each",
+          len(found) == 1 and found[0].minimum() == 0, str(len(found)))
+    if found:
+        interval = found[0]
+        saved = dialog.s["peek_interval_minutes"]
+        check("it opens at the stop for what is saved", stops[interval.value()] == saved,
+              "%s at %s" % (saved, interval.value()))
+        interval.setValue(stops.index(30) + 1)
+        check("one position past 30 is 60, not 31", dialog.s["peek_interval_minutes"] == 60,
+              str(dialog.s["peek_interval_minutes"]))
+        interval.setValue(stops.index(30) - 1)
+        check("and one before it is 20", dialog.s["peek_interval_minutes"] == 20,
+              str(dialog.s["peek_interval_minutes"]))
+        clock.peek._schedule.stop()
+        interval.setValue(stops.index(30))
+        # Qt swallows an exception raised in a slot, so only the timer says whether it ran.
+        # It once called a method that did not exist, and the clock's own start() with it.
+        left = clock.peek._schedule.remainingTime()
+        check("moving it re-arms the next peek, for the next half hour",
+              clock.peek._schedule.isActive() and 0 < left <= 30 * 60 * 1000, "%d ms" % left)
     dialog.close()
 except Exception:
     import traceback

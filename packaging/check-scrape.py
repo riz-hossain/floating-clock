@@ -183,6 +183,39 @@ check("nor three with no heading at all", read_ajax(page("".join("<p>%s</p>" % "
 check("and a row whose count fits neither reading is refused, not bent to fit",
       read_ajax(by_line("Salah Start Azan Iqamah", (("Fajr", "5:44 am", "06:00 AM", "06:10 AM", "06:15 AM"),) + ROWS3[1:])) is None)
 
+# A script-drawn timetable that, on a Friday, writes both Jumu'ahs where Dhuhr's iqama goes --
+# "1:40, 2:55" -- and one time in every other cell. The whole day was refused over that one cell,
+# every Friday, so a masjid read fine all week had no times at all on the day of Jumu'ah.
+FRIDAY = date(2026, 10, 2)
+
+
+def drawn(day: str, dhuhr: str, start: str = "1:12") -> str:
+    cells = (("Fajr", "6:04", "6:30"), ("Sunrise", "7:20", ""), ("Dhuhr", start, dhuhr),
+             ("Asr", "5:15", "5:30"), ("Magrib", "7:02", "7:06"), ("Isha", "8:21", "8:45"))
+    return page("<div><div>October 2026</div><div>%s</div><div> Today </div></div>" % day
+                + "".join('<div class="cell"><div>%s</div><div>%s</div><div>%s</div></div>' % c
+                          for c in cells)
+                + "<p>Iqamah and jumuah khutbah times are in green.</p>")
+
+
+found = read(drawn("2 Fri", "1:40, 2:55"), FRIDAY)
+check("a Friday's Dhuhr cell listing two Jumu'ahs is read, as the first of them",
+      times(found) == "06:30 13:40 17:30 19:06 20:45", times(found))
+check("and the reading says those were Jumu'ahs", bool(found and found.get("jumuah")))
+check("so do three of them, in winter's time", times(read(drawn("2 Fri", "12:40, 1:55 & 2:45", start="12:12"),
+                                                          FRIDAY, where=None)) == "06:30 12:40 17:30 19:06 20:45")
+found = read(drawn("3 Sat", "1:45"), date(2026, 10, 3))
+check("the next day's single Dhuhr is read as it always was", times(found) == "06:30 13:45 17:30 19:06 20:45"
+      and not found.get("jumuah"), times(found))
+found = read(drawn("3 Sat", "1:40, 2:55"), date(2026, 10, 3))
+check("a list on another day is read too, but is not called Jumu'ah",
+      times(found) == "06:30 13:40 17:30 19:06 20:45" and not found.get("jumuah"), times(found))
+check("a list out of order is not a list of congregations", read(drawn("2 Fri", "2:55, 1:40"), FRIDAY) is None)
+check("nor a cell with words in it, which may be saying something else",
+      read(drawn("2 Fri", "1:40 Arabic, 2:55 English"), FRIDAY) is None)
+check("nor a list when the start time shares its line, as an adhan and iqama might",
+      read(drawn("2 Fri", "1:40, 2:55", start="1:12 1:20"), FRIDAY) is None)
+
 # --- which day the times are for -------------------------------------------------------
 print("which day the times are for")
 
@@ -430,6 +463,18 @@ check("the cache reads back as today's five", [n for n, _w in parsed] == list(FI
 check("and nothing else -- a page shows one day", {w.date() for _n, w in parsed} == {TODAY})
 check("a day gone by is outside the window", scrape.parse(json.dumps(got), datetime(2026, 9, 21), datetime(2026, 9, 28)) == [])
 check("the source is named for the settings page", "A Masjid" in scrape.source_name(json.dumps(got)))
+
+friday = json.loads(scrape.fetch("https://masjid.example/", FRIDAY,
+                                 network({"https://masjid.example/": drawn("2 Fri", "1:40, 2:55")}),
+                                 where=WATERLOO))
+parsed = scrape.parse(json.dumps(friday), datetime(2026, 10, 2), datetime(2026, 10, 3))
+check("a Friday's cache reads back with Jumuah standing in for Dhuhr, as in every feed",
+      [(n, w.strftime("%H:%M")) for n, w in parsed] == [
+          ("Fajr", "06:30"), ("Jumuah", "13:40"), ("Asr", "17:30"), ("Maghrib", "19:06"), ("Isha", "20:45")],
+      str(parsed))
+check("but not on a day that is not a Friday, whatever the cache says",
+      [n for n, _w in scrape.parse(json.dumps(dict(friday, asof="2026-10-03")),
+                                   datetime(2026, 10, 3), datetime(2026, 10, 4))] == list(FIVE))
 
 try:
     scrape.fetch("https://masjid.example/", TODAY, network({"https://masjid.example/": page("<p>Welcome</p>")}),

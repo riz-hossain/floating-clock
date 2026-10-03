@@ -420,6 +420,51 @@ def _round_times(times) -> int:
     return sum(1 for m in times if m % 5 == 0)
 
 
+# What may stand between the times of a cell that lists several congregations.
+_LIST_GAP = re.compile(r"^\s*(?:,|&|and)\s*$", re.I)
+
+
+def _afternoon(value) -> int:
+    """A midday-to-evening time as minutes after midnight: "1:55" is 13:55."""
+    hour, minute, marker = value
+    if marker == "p" or (marker is None and hour < 11):
+        hour = hour % 12 + 12
+    elif marker == "a":
+        hour %= 12
+    return hour * 60 + minute
+
+
+def _congregations(items, lines):
+    """(items, times): Dhuhr's tokens with a cell of several times cut down to
+    its first, and the times that cell listed; (items, []) when there is none.
+
+    On a Friday a masjid with two Jumu'ahs writes both where Dhuhr's iqama
+    goes -- "Dhuhr | 1:12 | 1:40, 2:55" -- and the first is when the
+    congregation first stands. Only a cell of its own counts, with the row's
+    other times on lines of their own, one apiece: "5:12, 5:45" sharing a line
+    is just as often an adhan and its iqama, and a comma cannot say which.
+    """
+    by_line: dict = {}
+    for t in items:
+        if t.kind == "time":
+            by_line.setdefault(t.line, []).append(t)
+    crowded = [n for n, found in by_line.items() if len(found) > 1]
+    if len(crowded) != 1 or len(by_line) < 2:
+        return items, []
+    listed = by_line[crowded[0]]
+    text = lines[crowded[0]]
+    spans = [m.span() for m in _TIME_RE.finditer(text)]
+    if len(spans) != len(listed) or text[:spans[0][0]].strip() or text[spans[-1][1]:].strip():
+        return items, []                     # words in the cell: a label, not a list
+    if not all(_LIST_GAP.match(text[a[1]:b[0]]) for a, b in zip(spans, spans[1:])):
+        return items, []
+    clock = [_afternoon(t.value) for t in listed]
+    if any(a >= b for a, b in zip(clock, clock[1:])):
+        return items, []
+    later = {id(t) for t in listed[1:]}
+    return [t for t in items if id(t) not in later], listed
+
+
 def _iqama_of(items, header, prayer, words, sun):
     """(iqama, adhan, quality, kind) for one prayer, or None.
 
@@ -525,12 +570,18 @@ def _read_block(tokens, lines, run, sun):
     """One candidate: five prayers' iqamas, or None if they do not add up."""
     header = _headers(tokens, lines, run[0])
     result, adhans, kinds = {}, {}, {}
+    listed = []
     worst = LABELLED
     for k, prayer in enumerate(DAILY):
         stop = run[k + 1] if k + 1 < len(run) else len(tokens)
         items = _group(tokens, run[k], stop)
         words = _group_text(lines, tokens, run[k], stop)
         found = _iqama_of(items, header, prayer, words, sun)
+        if found is None and prayer == "Dhuhr":
+            # Only once the row as written will not read, so no reading that
+            # stands today can be changed by it.
+            fewer, listed = _congregations(items, lines)
+            found = _iqama_of(fewer, header, prayer, words, sun) if listed else None
         if found is None:
             return None
         minutes, adhan, quality, kind = found
@@ -543,7 +594,8 @@ def _read_block(tokens, lines, run, sun):
         return None
     return {"minutes": result, "quality": worst, "kinds": kinds,
             "lines": (tokens[run[0]].line, tokens[run[-1]].line),
-            "today": _says_today(lines, tokens[run[0]].line)}
+            "today": _says_today(lines, tokens[run[0]].line),
+            "congregations": len(listed)}
 
 
 def _says_today(lines, first: int) -> bool:
@@ -925,7 +977,10 @@ def extract(html: str, today: date | None = None, where=None) -> dict | None:
     sun-based checks are skipped and Maghrib written as "sunset" cannot be read.
 
     {"iqamah": {"Fajr": "06:15", ...}, "quality": 1..3, "how": "labelled",
-     "computed": ["Maghrib"], "sun_checked": True}
+     "computed": ["Maghrib"], "sun_checked": True, "jumuah": False}
+
+    "jumuah" is True on a Friday whose Dhuhr cell listed several times: those
+    are its Jumu'ahs, and "Dhuhr" holds the first.
     """
     today = today or date.today()
     coords = where or find_coordinates(html)
@@ -965,6 +1020,7 @@ def extract(html: str, today: date | None = None, where=None) -> dict | None:
         "how": HOW[block["quality"]],
         "computed": [p for p in DAILY if block["kinds"][p] == "computed"],
         "sun_checked": sun is not None,
+        "jumuah": today.weekday() == 4 and bool(block.get("congregations")),
     }
 
 
@@ -1234,6 +1290,7 @@ def fetch(site_url: str, today: date | None = None, opener=None,
         "computed": reading["computed"],
         "sun_checked": reading["sun_checked"],
         "iqamah": reading["iqamah"],
+        "jumuah": bool(reading.get("jumuah")),
     })
 
 
@@ -1242,7 +1299,8 @@ def parse(text: str, window_start: datetime, window_end: datetime) -> list:
     """(name, iqama) for the day the page was read, inside the window.
 
     One day only, like PrayersConnect: a page shows today's times and nothing
-    about next week's. The clock reads again every night.
+    about next week's. The clock reads again every night. A Friday's Jumu'ah,
+    when the page listed them, stands in for Dhuhr as it does in every feed.
     """
     try:
         data = json.loads(text)
@@ -1250,6 +1308,7 @@ def parse(text: str, window_start: datetime, window_end: datetime) -> list:
         times = data["iqamah"]
     except (ValueError, KeyError, TypeError):
         return []
+    friday = bool(data.get("jumuah")) and day.weekday() == 4
     found = []
     for name in DAILY:
         raw = str(times.get(name) or "")
@@ -1258,7 +1317,7 @@ def parse(text: str, window_start: datetime, window_end: datetime) -> list:
             continue
         when = datetime(day.year, day.month, day.day, int(m.group(1)), int(m.group(2)))
         if window_start <= when <= window_end:
-            found.append((name, when))
+            found.append(("Jumuah" if friday and name == "Dhuhr" else name, when))
     found.sort(key=lambda item: (item[1], item[0]))
     return found
 

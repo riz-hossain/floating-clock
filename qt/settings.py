@@ -192,24 +192,35 @@ class SettingsDialog(QtWidgets.QDialog):
         box.stateChanged.connect(changed)
         layout.addWidget(box)
 
-    def _slider(self, layout, text: str, key: str, low, high, step, apply, integer=True) -> None:
+    def _slider(self, layout, text: str, key: str, low, high, step, apply, integer=True,
+                values=None) -> None:
+        """`values`, when given, are the only stops: the slider moves along their positions."""
         row = QtWidgets.QHBoxLayout()
         label = QtWidgets.QLabel(text)
         value = QtWidgets.QLabel()
         value.setObjectName("muted")
         slider = _Slider(QtCore.Qt.Orientation.Horizontal)
         scale = 1 if integer else 100
-        slider.setRange(int(low * scale), int(high * scale))
-        slider.setSingleStep(int(step * scale))
-        slider.setValue(int(float(self.s[key]) * scale))
+        if values:
+            stops = tuple(values)
+            at = lambda v: stops[v]                     # noqa: E731
+            slider.setRange(0, len(stops) - 1)
+            slider.setSingleStep(1)
+            saved = float(self.s[key])
+            slider.setValue(min(range(len(stops)), key=lambda i: abs(stops[i] - saved)))
+        else:
+            at = lambda v: v / scale                    # noqa: E731
+            slider.setRange(int(low * scale), int(high * scale))
+            slider.setSingleStep(int(step * scale))
+            slider.setValue(int(float(self.s[key]) * scale))
 
         def show(v) -> None:
-            value.setText(("%d" if integer else "%.2f") % (v / scale))
+            value.setText(("%d" if integer else "%.2f") % at(v))
         show(slider.value())
 
         def moved(v) -> None:
             show(v)
-            apply(v / scale)
+            apply(at(v))
         slider.valueChanged.connect(moved)
         row.addWidget(label)
         row.addWidget(slider, 1)
@@ -274,9 +285,9 @@ class SettingsDialog(QtWidgets.QDialog):
                         "screen, waits a moment, then slides back.")
         self._check(g, "Peek at the centre periodically", "peek_enabled", repaint=False)
         self._check(g, "Play a soft whoosh as it comes and goes", "peek_sound", repaint=False)
-        self._slider(g, "Every (minutes)", "peek_interval_minutes", 1, 120, 1,
+        self._slider(g, "Every (minutes)", "peek_interval_minutes", 1, 240, 1,
                      lambda v: (self.s.__setitem__("peek_interval_minutes", int(v)),
-                                self.clock.peek.schedule()))
+                                self.clock.peek.schedule()), values=cfg.PEEK_INTERVALS)
         self._slider(g, "Hold (seconds)", "peek_hold_seconds", 0.3, 10, 0.1,
                      lambda v: self.s.__setitem__("peek_hold_seconds", float(v)), integer=False)
         self._slider(g, "Zoom", "peek_zoom", 1.0, 2.0, 0.05,

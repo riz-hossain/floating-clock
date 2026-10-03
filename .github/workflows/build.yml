@@ -77,6 +77,13 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-scrape.py
+      - name: A peek keeps to the same minutes of every hour
+        # Peeks come at the wall clock's multiples of the interval, so an interval that
+        # does not fit the hour (a slider nudged from 30 to 28) puts them at :56, :24, :52.
+        # The settings only hold ones that fit, and put a saved odd one right.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-peek.py
       - name: Finding a masjid, offline
         # The map, merging sources, and offering a nearby masjid's times when
         # a masjid has none of its own -- labelled, never passed off as its own.
