@@ -422,7 +422,8 @@ class SettingsUI(CalendarsPage):
         return switch
 
     def _slider_row(self, card: w.Card, text: str, from_, to, variable, fmt: str,
-                    command=None, integer: bool = True, step=None, caption: str = "") -> w.Slider:
+                    command=None, integer: bool = True, step=None, caption: str = "",
+                    values=None) -> w.Slider:
         ui = self._ui
         row = card.row(pady=8)
         top = tk.Frame(row, bg=ui.p.card)
@@ -437,7 +438,8 @@ class SettingsUI(CalendarsPage):
             if command:
                 command(value)
 
-        slider = w.Slider(row, ui, from_, to, variable, on_change, integer=integer, step=step)
+        slider = w.Slider(row, ui, from_, to, variable, on_change, integer=integer, step=step,
+                          values=values)
         slider.pack(fill="x", pady=(ui.px(6), 0))
         return slider
 
@@ -553,8 +555,8 @@ class SettingsUI(CalendarsPage):
             return handler
 
         self._slider_row(
-            card, "How often", 1, 120, bound("peek_interval_minutes"), "every %d min",
-            store("peek_interval_minutes", self.reschedule_peek),
+            card, "How often", 1, 240, bound("peek_interval_minutes"), "every %d min",
+            store("peek_interval_minutes", self.reschedule_peek), values=cfg.PEEK_INTERVALS,
         )
         self._slider_row(
             card, "Hold in the centre", 0.3, 10.0, bound("peek_hold_seconds", False), "%s s",

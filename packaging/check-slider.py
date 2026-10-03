@@ -19,6 +19,7 @@ import sys
 import tkinter as tk
 
 from floating_clock import palette as pal_mod
+from floating_clock import settings as cfg
 from floating_clock import widgets as w
 from floating_clock.settings_ui import SettingsUI
 
@@ -48,6 +49,15 @@ class At:
 
     def __init__(self, x: int) -> None:
         self.x = x
+
+
+def _all(node, kind) -> list:
+    found = []
+    for child in node.winfo_children():
+        if isinstance(child, kind):
+            found.append(child)
+        found.extend(_all(child, kind))
+    return found
 
 
 app = FloatingClock()
@@ -97,7 +107,38 @@ try:
     check("armed at its top end, a further wheel-up is still consumed even though nothing moves",
           result == "break" and at_top.get() == 10, repr((result, at_top.get())))
 
+    print("a slider with stops")
+    stops = (1, 5, 15, 30, 60)
+    picked = tk.IntVar(master=app.root, value=28)
+    stopped = w.Slider(app.root, ui, 0, 0, picked, integer=True, bg=ui.p.window, values=stops)
+    stopped.pack(fill="x")
+    app.root.update_idletasks()
+    check("a value between stops is drawn at the nearest one", stopped._fraction() == 0.75,
+          str(stopped._fraction()))
+    stopped._press(At(-50))
+    check("pressing at the left end picks the first stop", picked.get() == 1, str(picked.get()))
+    stopped._drag(At(stopped.winfo_width() // 2))
+    check("dragging to the middle picks the middle stop, not the middle of the range",
+          picked.get() == 15, str(picked.get()))
+    steps = []
+    for _ in range(3):
+        stopped._wheel(Wheel(120))
+        steps.append(picked.get())
+    check("each turn of the wheel moves one stop, and the last one holds",
+          steps == [30, 60, 60], str(steps))
+    stopped._wheel(Wheel(-120))
+    check("and back down one", picked.get() == 30, str(picked.get()))
+
     print("a real settings page")
+    app.open_settings()
+    app._show_page("behaviour")
+    app.root.update_idletasks()
+    interval = [s for s in _all(app._settings_win, w.Slider) if s.values]
+    check("the peek interval is the one slider on the page with stops, and they are the settings' own",
+          len(interval) == 1 and interval[0].values == cfg.PEEK_INTERVALS,
+          str([s.values for s in interval]))
+    app._close_settings(app._settings_win)
+
     app.open_settings()
     app._show_page("clock")
     app.root.update_idletasks()

@@ -16,6 +16,20 @@ OPACITY_STEP = 0.05
 MIN_FONT = 14
 MAX_FONT = 200
 
+# A peek comes at the wall clock's multiples of its interval, counted from
+# midnight (peek.seconds_until_boundary), so it keeps to the same minutes of
+# every hour only when the interval divides the hour, or is whole hours that
+# divide the day. Every 28 minutes it comes at :56, :24, :52 -- which reads as
+# random. One notch of a slider once turned 30 into 28 and it stayed that way.
+PEEK_INTERVALS = (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60, 120, 180, 240)
+
+
+def peek_interval(minutes) -> int:
+    """The nearest of PEEK_INTERVALS; the longer of two equally near."""
+    value = float(minutes)
+    return min(PEEK_INTERVALS, key=lambda stop: (abs(stop - value), -stop))
+
+
 DEFAULTS: dict = {
     "x": None,
     "y": None,
@@ -270,7 +284,12 @@ def sanitise(data: dict) -> dict:
         data["meeting_lead_minutes"] = min(60, max(1, int(data["meeting_lead_minutes"])))
         data["calendar_poll_seconds"] = min(3600, max(30, int(data["calendar_poll_seconds"])))
         data["calendar_hours_ahead"] = min(72, max(1, int(data["calendar_hours_ahead"])))
-        data["peek_interval_minutes"] = min(240, max(1, int(data["peek_interval_minutes"])))
+        interval = peek_interval(data["peek_interval_minutes"])
+        if interval != float(data["peek_interval_minutes"]):
+            logging.getLogger(__name__).info(
+                "Peeking every %s minutes would wander round the hour; every %d instead",
+                data["peek_interval_minutes"], interval)
+        data["peek_interval_minutes"] = interval
         data["peek_hold_seconds"] = min(10.0, max(0.3, float(data["peek_hold_seconds"])))
         data["peek_zoom"] = min(2.0, max(1.0, float(data["peek_zoom"])))
         data["peek_travel_ms"] = min(3000, max(120, int(data["peek_travel_ms"])))
