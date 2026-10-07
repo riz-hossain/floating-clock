@@ -532,6 +532,13 @@ _LINK_PRAYERSCONNECT = re.compile(
 # known from the address, which is what makes it safe to follow.
 _LINK_MASJIDBOX = re.compile(
     r"masjidbox\.com/prayer-times/([a-z0-9][a-z0-9_-]{2,})", re.I)
+# Any address the page points at, and webcal: links written as plain text --
+# the "add to Apple Calendar" button is often exactly that.
+_LINK_HREF = re.compile(r"""(?:href|src)\s*=\s*["']([^"'\s>]+)["']""", re.I)
+_LINK_WEBCAL = re.compile(r"""webcal://[^\s"'<>]+""", re.I)
+# A page listing many calendars is listing other people's; take the first few
+# and let the prayer check decide, rather than fetching a page full of them.
+MAX_LINKED_CALENDARS = 4
 
 
 def _looks_right(text: str) -> str:
@@ -572,7 +579,48 @@ def _asked(key: str, fetch):
     return run
 
 
-def _embedded_page(home: str) -> str:
+def _page_html(home: str) -> str:
+    """The page's own HTML, or "" when it will not come.
+
+    Read once and handed to everything that looks through it, so a site is
+    not downloaded twice to answer two questions about it.
+    """
+    try:
+        request = urllib.request.Request(home, headers={"User-Agent": dpt.USER_AGENT})
+        with urllib.request.urlopen(request, timeout=dpt.FETCH_TIMEOUT) as response:
+            return response.read(600_000).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def linked_calendars(page: str, home: str) -> list:
+    """The calendar addresses a page links, in the order it links them.
+
+    webcal: is the same feed under another scheme -- it is what "add to Apple
+    Calendar" hands out -- so it is read as https. Share links are left where
+    they are: calendar.google.com/calendar/u/0?cid=... opens a page for a
+    person to click, and is not a feed.
+    """
+    found: list = []
+    seen = set()
+    candidates = [match.group(1) for match in _LINK_HREF.finditer(page or "")]
+    candidates += [match.group(0) for match in _LINK_WEBCAL.finditer(page or "")]
+    for raw in candidates:
+        url = raw.strip().replace("&amp;", "&")
+        if url.lower().startswith("webcal://"):
+            url = "https://" + url[len("webcal://"):]
+        elif not url.lower().startswith(("http://", "https://")):
+            url = urllib.parse.urljoin(home, url)
+        if not dpt.looks_like_ics(url):
+            continue
+        key = url.lower()
+        if key not in seen:
+            seen.add(key)
+            found.append(url)
+    return found[:MAX_LINKED_CALENDARS]
+
+
+def _embedded_page(home: str, page: str | None = None) -> str:
     """The one masjid page on a platform we read that this site embeds, or "".
 
     Exactly one, and only one: a page that links several is pointing at other
@@ -580,11 +628,8 @@ def _embedded_page(home: str) -> str:
     masjid's times is worse than reading none. The settings page names whose
     times were read, so a wrong guess would at least be visible.
     """
-    try:
-        request = urllib.request.Request(home, headers={"User-Agent": dpt.USER_AGENT})
-        with urllib.request.urlopen(request, timeout=dpt.FETCH_TIMEOUT) as response:
-            html = response.read(600_000).decode("utf-8", "replace")
-    except Exception:
+    html = _page_html(home) if page is None else page
+    if not html:
         return ""
     found = {}
     for match in _LINK_MAWAQIT.finditer(html):
@@ -655,10 +700,13 @@ def _fetcher_for(url: str, where=None):
             else:
                 step.ok("the site's own prayer-times plug-in")
                 return text
+        # Read once, looked through twice: for a platform page it embeds, and
+        # for a calendar it links.
+        page = _page_html(home)
         # The site may embed a page on a platform we do read. Many masjids do
         # exactly that with a mawaqit widget.
         with line.step("embed") as step:
-            linked = _embedded_page(home)
+            linked = _embedded_page(home, page)
             if not linked:
                 step.ok("none found")
             else:
@@ -679,6 +727,29 @@ def _fetcher_for(url: str, where=None):
                 else:
                     step.ok("read the times from %s" % _platform_of(linked))
                     return text
+        # The masjid may publish no plug-in and still hand out its iqamah
+        # calendar on the page -- "add to Apple Calendar", or a Google link.
+        # That feed is a year of exact times, so it beats reading the page,
+        # and on a page that draws its times with a script it is the only
+        # thing that works at all.
+        with line.step("linked calendar") as step:
+            calendars = linked_calendars(page, home)
+            if not calendars:
+                step.ok("the page links no calendar")
+            else:
+                for candidate in calendars:
+                    try:
+                        text = ics.fetch(candidate)
+                        now = datetime.now()
+                        if parse_ics(text, now - timedelta(hours=18),
+                                     now + timedelta(days=WINDOW_DAYS)):
+                            step.ok("the page links an iqamah calendar at %s"
+                                    % _host_of(candidate))
+                            return text
+                    except Exception:
+                        continue
+                step.ok("the %d calendar%s it links hold no prayer times"
+                        % (len(calendars), "" if len(calendars) == 1 else "s"))
         # It may still be a calendar -- but one with prayers in it: a site's
         # events feed is a calendar too, and says nothing about iqama.
         with line.step("calendar") as step:
