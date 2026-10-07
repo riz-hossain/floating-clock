@@ -425,8 +425,12 @@ check("and by default there is none", cfg.DEFAULTS["prayer_lat"] is None and cfg
 print("reading a site's own page, last")
 
 seen: dict = {}
-real_parts = (dpt.resolve, dpt.fetch, prayer._embedded_page, ics.fetch, scrape.fetch, prayer._renderer)
+real_parts = (dpt.resolve, dpt.fetch, prayer._embedded_page, ics.fetch, scrape.fetch, prayer._renderer,
+              prayer._page_html)
 dpt.resolve = lambda address, **k: address
+# The page is never really downloaded here: what it would say is stubbed into
+# _embedded_page and ics.fetch below, and these checks stay offline.
+prayer._page_html = lambda home: ""
 
 
 def no_api(home, **k):
@@ -444,7 +448,8 @@ def scraped(home, **k):
                                                      "Maghrib": "19:28", "Isha": "21:00"}})
 
 
-dpt.fetch, prayer._embedded_page, ics.fetch, scrape.fetch = no_api, (lambda home: ""), no_calendar, scraped
+dpt.fetch, prayer._embedded_page, ics.fetch, scrape.fetch = (
+    no_api, (lambda home, page=None: ""), no_calendar, scraped)
 prayer._renderer = lambda: "the browser"
 folder = tempfile.mkdtemp(prefix="floating-clock-check-")
 loaded, status = prayer.load(folder, "http://erin.example", force=True, where=(43.77, -80.06))
@@ -480,7 +485,7 @@ def read_page(sun_checked):
 
 
 print("a plugin that is there but not usable")
-dpt.fetch, prayer._embedded_page, ics.fetch = stale_plugin, (lambda home: ""), no_calendar
+dpt.fetch, prayer._embedded_page, ics.fetch = stale_plugin, (lambda home, page=None: ""), no_calendar
 seen.clear()
 scrape.fetch = read_page(True)
 loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
@@ -496,13 +501,13 @@ loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "
 check("and if nothing else works, the message is the plugin's, which says what to fix",
       not loaded and "stops at 2024-12-31" in status and "mawaqit.net" not in status, status)
 
-prayer._embedded_page = lambda home: "https://mawaqit.net/en/erin-centre-erin"
+prayer._embedded_page = lambda home, page=None: "https://mawaqit.net/en/erin-centre-erin"
 real_mawaqit_fetch = mawaqit.fetch
 mawaqit.fetch = lambda page, **k: scraped("x")
 loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://erin.example", force=True)
 check("a mawaqit widget on the page is used when the plugin is not", bool(loaded), status)
 mawaqit.fetch = real_mawaqit_fetch
-prayer._embedded_page = lambda home: ""
+prayer._embedded_page = lambda home, page=None: ""
 
 print("a calendar with no prayers in it")
 tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y%m%dT120000Z")
@@ -529,7 +534,8 @@ scrape.fetch = scraped
 loaded, status = prayer.load(tempfile.mkdtemp(prefix="floating-clock-check-"), "http://gone.example", force=True)
 check("is an error at once", not loaded and "could not reach the site" in status, status)
 check("and nothing further is tried", not seen)
-dpt.resolve, dpt.fetch, prayer._embedded_page, ics.fetch, scrape.fetch, prayer._renderer = real_parts
+(dpt.resolve, dpt.fetch, prayer._embedded_page, ics.fetch, scrape.fetch, prayer._renderer,
+ prayer._page_html) = real_parts
 
 print("probing a site")
 
