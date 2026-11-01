@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import dpt, ics, mawaqit, prayersconnect, scrape, timeline, webrender
+from . import astro, dpt, ics, mawaqit, prayersconnect, scrape, timeline, webrender
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +41,14 @@ WATERLOO_MASJID_ICS = (
 )
 SOURCE_NAME = "Waterloo Masjid"
 SOURCE_WHERE = "213 Erb St W, Waterloo"
+# Its page runs the masjid's own table, with the clock change on the right day,
+# where the calendar has been out by three days around each one.
+WATERLOO_MASJID_PAGE = "https://waterloomasjid.com/main/"
+WATERLOO_MASJID_POSITION = (43.4627, -80.5363)
 
 CACHE_NAME = "prayer-times.ics"
+# Today's times read off the masjid's page, for a day its calendar has wrong.
+PAGE_CACHE_NAME = "prayer-times-today.json"
 # The feed is a year long, so it needs looking at rarely; twice a day keeps a
 # machine that is seldom awake from ever running out of times.
 REFRESH_HOURS = 12.0
@@ -407,10 +413,12 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
     feed when it is not, and from the saved copy again when the feed cannot
     be reached. `status` is one plain sentence for the settings page.
 
-    `where` is the masjid's (latitude, longitude), when known. It is only used
-    to check a reading taken off a web page against the sun."""
+    `where` is the masjid's (latitude, longitude), when known. It is used to
+    check a calendar, or a reading taken off a web page, against the sun."""
     now = now or datetime.now()
     url = (url or "").strip() or WATERLOO_MASJID_ICS
+    if where is None and url == WATERLOO_MASJID_ICS:
+        where = WATERLOO_MASJID_POSITION
     fetcher = fetcher or _fetcher_for(url, where)
     path = cache_path(base_dir)
     text = _read(path)
@@ -436,6 +444,10 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
     with timeline.current().step("check") as step:
         prayers = parse(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS))
         prayers, doubtful = screen(prayers)
+        mended = ""
+        if where and text.lstrip()[:1] not in ("{", "["):
+            prayers, mended = _mend_calendar(base_dir, url, where, prayers, now, force)
+            doubtful = doubtful or mended
         if prayers:
             # a time that was dropped is said so, not passed over as a clean pass
             step.ok(doubtful or _looks_right(text))
@@ -444,11 +456,86 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
     if not prayers:
         return [], note or doubtful or "No prayer times found in that calendar."
     if note:
-        return prayers, note
+        return prayers, ("%s %s" % (note, mended)).strip()
     last = max(prayer.iqama for prayer in prayers)
-    return prayers, "%s · updated %s · times through %s." % (
+    status = "%s · updated %s · times through %s." % (
         source_label(url, text), _ago(age or 0.0), last.strftime("%a %d %b"),
     )
+    return prayers, ("%s %s" % (status, mended)).strip()
+
+
+def against_sun(prayers, where) -> tuple[list, dict]:
+    """(kept, refused): the days the sun allows, and {day: why} for those it does not.
+
+    A calendar is written ahead of time, and one that has the clock change on
+    the wrong date is an hour out for days on end. A day goes whole: if Maghrib
+    is an hour after it can be, the rest of that day cannot be trusted either.
+    """
+    days: dict = {}
+    for item in prayers:
+        days.setdefault(item.iqama.date(), {})[item.name] = item.iqama.hour * 60 + item.iqama.minute
+    refused = {}
+    for day, times in days.items():
+        why = astro.check(times, astro.sun_today(where[0], where[1], day))
+        if why:
+            refused[day] = why
+    return [item for item in prayers if item.iqama.date() not in refused], refused
+
+
+def _page_behind(url: str) -> str:
+    """The page that can stand in for a calendar's bad day, or "" if none is known."""
+    if url == WATERLOO_MASJID_ICS:
+        return WATERLOO_MASJID_PAGE
+    return "" if dpt.looks_like_ics(url) else url
+
+
+def _today_from_page(base_dir: str, page: str, where, now: datetime, force: bool) -> list[Prayer]:
+    """Today's iqamas off the masjid's page, read at most once a day unless asked.
+
+    One day only, as every page reading is; the nightly check reads the next.
+    A forced read starts clean, since it may be for a different masjid.
+    """
+    path = os.path.join(base_dir, PAGE_CACHE_NAME)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window = (midnight, midnight + timedelta(days=1))
+    text = "" if force else _read(path)
+    if not scrape.parse(text, *window):
+        try:
+            with timeline.hushed():
+                fetched = scrape.fetch(page, today=now.date(), where=where, render=_renderer())
+        except Exception as exc:
+            log.info("Prayer times: could not read today's from the page (%s)", _reason(exc))
+        else:
+            if scrape.sun_checked(fetched):
+                _write(path, fetched)
+                text = fetched
+    return [Prayer(name=name, iqama=when) for name, when in scrape.parse(text, *window)]
+
+
+def _mend_calendar(base_dir: str, url: str, where, prayers, now: datetime,
+                   force: bool) -> tuple[list, str]:
+    """(prayers, what was wrong): a calendar's days checked against the sun, with
+    today's taken from the masjid's page if the sun refuses them. "" when all is well."""
+    kept, refused = against_sun(prayers, where)
+    if not refused:
+        return prayers, ""
+    first = min(refused)
+    days = first.strftime("%a %d %b")
+    if len(refused) > 1:
+        days = "%d days from %s" % (len(refused), days)
+    said = "Its calendar is wrong for %s: %s. Those days are left out" % (days, refused[first])
+    if now.date() in refused:
+        page = _page_behind(url)
+        today = _today_from_page(base_dir, page, where, now, force) if page else []
+        if today:
+            kept = sorted(kept + today, key=lambda p: (p.iqama, p.name))
+            said += ", and today's times are from its web page."
+        else:
+            said += ", so there are no times for today."
+    else:
+        said += "."
+    log.warning("Prayer times: %s", said)
+    return kept, said
 
 
 # Where each iqama can fall on a masjid's own clock, in any month, anywhere in
@@ -945,7 +1032,7 @@ class Loader:
             return
         self.next_check = now + CHECK_EVERY
         if refresh_due(now, checked_at(self._dir()), self.last_try,
-                       bool(self.prayers), self.failures):
+                       bool(on_day(self.prayers, now.date())), self.failures):
             log.info("Checking %s's calendar for changes", SOURCE_NAME)
             self._start(force=True)
 
@@ -993,8 +1080,8 @@ class Loader:
     # --- back on the UI thread ---------------------------------------------
     def _done(self, found, status: str) -> None:
         self.loading = False
-        # Nothing found, or the load itself blew up: one more in a row.
-        self.failures = 0 if found else self.failures + 1
+        # Nothing for today, or the load itself blew up: one more in a row.
+        self.failures = 0 if on_day(found or (), datetime.now().date()) else self.failures + 1
         if found is None:
             return
         previous = list(self.prayers or ())

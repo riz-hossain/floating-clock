@@ -242,6 +242,9 @@ check("one bad time among good ones is said, not passed over as a clean pass",
 # --- how a site is tried ------------------------------------------------------------------------
 print("how a site is tried")
 real = (dpt.resolve, dpt.fetch, ics.fetch, scrape.fetch, prayer._embedded_page, prayer._renderer, mawaqit.fetch)
+# The page is never really downloaded here: what it would say is stubbed into
+# _embedded_page below, and these checks stay offline.
+prayer._page_html = lambda home: ""
 
 
 def restore() -> None:
@@ -259,7 +262,7 @@ def not_a_calendar(address):
 dpt.resolve = lambda address, strict=False: address
 dpt.fetch = no_plugin
 ics.fetch = not_a_calendar
-prayer._embedded_page = lambda home: ""
+prayer._embedded_page = lambda home, page=None:""
 prayer._renderer = lambda: None
 scrape.fetch = lambda site_url, **kw: "READ FROM THE PAGE"
 
@@ -291,7 +294,7 @@ check("and the plug-in's complaint is what is raised, since a page read beside a
       isinstance(err, dpt.DptError) and "last year" in str(err), repr(err))
 dpt.fetch = no_plugin
 
-prayer._embedded_page = lambda home: "https://mawaqit.net/en/some-masjid-name"
+prayer._embedded_page = lambda home, page=None:"https://mawaqit.net/en/some-masjid-name"
 mawaqit.fetch = lambda url: "FROM MAWAQIT"
 line, got, err = watched(lambda: fetch(HOME))
 r = rows(line)
@@ -310,7 +313,7 @@ check("an embedded page that does not read is said not to, and the site's own pa
       "did not read" in r["site.embed"][1] and got == "READ FROM THE PAGE", str((r["site.embed"], got)))
 
 # a widget read with the same reader that reads the site must not write over the site's steps
-prayer._embedded_page = lambda home: "https://widgets.example/prayer"
+prayer._embedded_page = lambda home, page=None:"https://widgets.example/prayer"
 
 
 def widget_read(site_url, **kw):
@@ -332,7 +335,7 @@ def widget_then_stop(site_url, **kw):
     raise AssertionError("Stop was not seen")
 
 
-prayer._embedded_page = lambda home: "https://widgets.example/prayer"
+prayer._embedded_page = lambda home, page=None:"https://widgets.example/prayer"
 scrape.fetch = widget_then_stop
 line = Timeline(Clock())
 line.plan("Test Masjid", [WEBSITE])
@@ -365,7 +368,7 @@ r = rows(line)
 check("it is the step that was running that says it was stopped, and not one that carried on past it",
       r["site.embed"] == (FAILED, "stopped"), str(r["site.embed"]))
 scrape.fetch = lambda site_url, **kw: "READ FROM THE PAGE"
-prayer._embedded_page = lambda home: ""
+prayer._embedded_page = lambda home, page=None:""
 
 dpt.resolve = lambda address, strict=False: (_ for _ in ()).throw(dpt.NoApi("that address could not be reached"))
 line, got, err = watched(lambda: fetch(HOME))
