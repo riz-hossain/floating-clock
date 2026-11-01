@@ -77,6 +77,12 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-scrape.py
+      - name: A calendar with the clock change on the wrong date, offline
+        # An hour out for days on end, so the azan is called late: the sun catches
+        # the day, the day goes whole, and today comes from the masjid's page.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-clock-change.py
       - name: A peek keeps to the same minutes of every hour
         # Peeks come at the wall clock's multiples of the interval, so an interval that
         # does not fit the hour (a slider nudged from 30 to 28) puts them at :56, :24, :52.
