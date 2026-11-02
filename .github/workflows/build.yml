@@ -83,6 +83,12 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-clock-change.py
+      - name: The default masjid's year, from its page's own script, offline
+        # Its calendar is wrong around each clock change, for Jumu'ah all year and for
+        # Fajr in winter. A saved table outranks it, and what it has wrong is left out.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-page-table.py
       - name: A peek keeps to the same minutes of every hour
         # Peeks come at the wall clock's multiples of the interval, so an interval that
         # does not fit the hour (a slider nudged from 30 to 28) puts them at :56, :24, :52.
