@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import astro, dpt, ics, mawaqit, prayersconnect, scrape, timeline, webrender
+from . import astro, dpt, ics, mawaqit, pagetable, prayersconnect, scrape, timeline, webrender
 
 log = logging.getLogger(__name__)
 
@@ -42,11 +42,14 @@ WATERLOO_MASJID_ICS = (
 SOURCE_NAME = "Waterloo Masjid"
 SOURCE_WHERE = "213 Erb St W, Waterloo"
 # Its page runs the masjid's own table, with the clock change on the right day,
-# where the calendar has been out by three days around each one.
+# where the calendar has been out by three days around each one, has Jumu'ah at
+# 13:30 all year, and Fajr five minutes early for six weeks of winter. So the
+# table is read first, and the calendar only on a machine that cannot read it.
 WATERLOO_MASJID_PAGE = "https://waterloomasjid.com/main/"
 WATERLOO_MASJID_POSITION = (43.4627, -80.5363)
 
 CACHE_NAME = "prayer-times.ics"
+UNREACHED = "Could not reach the calendar"
 # Today's times read off the masjid's page, for a day its calendar has wrong.
 PAGE_CACHE_NAME = "prayer-times-today.json"
 # The feed is a year long, so it needs looking at rarely; twice a day keeps a
@@ -419,9 +422,9 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
     url = (url or "").strip() or WATERLOO_MASJID_ICS
     if where is None and url == WATERLOO_MASJID_ICS:
         where = WATERLOO_MASJID_POSITION
-    fetcher = fetcher or _fetcher_for(url, where)
     path = cache_path(base_dir)
     text = _read(path)
+    fetcher = fetcher or _fetcher_for(url, where, text, now)
     age = age_hours(path)
     stale = age is None or age >= REFRESH_HOURS
     note = ""
@@ -432,7 +435,7 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
         except Exception as exc:
             if not text:
                 return [], "Could not read the prayer times: %s" % _reason(exc)
-            note = "Could not reach the calendar; using the copy saved %s." % _ago(age or 0.0)
+            note = "%s; using the copy saved %s." % (UNREACHED, _ago(age or 0.0))
             log.info("Prayer times: feed unreachable (%s); using the cache", _reason(exc))
         else:
             if fetched.strip():
@@ -443,11 +446,17 @@ def load(base_dir: str, url: str = "", now: datetime | None = None,
 
     with timeline.current().step("check") as step:
         prayers = parse(text, now - timedelta(hours=18), now + timedelta(days=WINDOW_DAYS))
+        calendar = text.lstrip()[:1] not in ("{", "[")
+        no_jumuah = ""
+        if calendar and url == WATERLOO_MASJID_ICS and any(p.name == "Jumuah" for p in prayers):
+            prayers = [p for p in prayers if p.name != "Jumuah"]
+            no_jumuah = "Its calendar has Friday's Jumu'ah at the wrong time, so it is left out."
         prayers, doubtful = screen(prayers)
         mended = ""
-        if where and text.lstrip()[:1] not in ("{", "["):
+        if where and (calendar or _cached_source(text) == pagetable.SOURCE):
             prayers, mended = _mend_calendar(base_dir, url, where, prayers, now, force)
-            doubtful = doubtful or mended
+        mended = ("%s %s" % (no_jumuah, mended)).strip()
+        doubtful = doubtful or mended
         if prayers:
             # a time that was dropped is said so, not passed over as a clean pass
             step.ok(doubtful or _looks_right(text))
@@ -733,7 +742,27 @@ def _renderer():
     return webrender.html_of if webrender.available() else None
 
 
-def _fetcher_for(url: str, where=None):
+def _table_first(saved: str, now: datetime):
+    """The default masjid's table off its page, or its calendar when that is all there is.
+
+    A table already saved outranks the calendar for as long as it has today in it:
+    a site that is down for a night must not swap good times for known-wrong ones.
+    """
+    def fetch(address: str) -> str:
+        try:
+            if not webrender.available():
+                raise pagetable.TableError("no browser on this machine")
+            return pagetable.fetch(WATERLOO_MASJID_PAGE, SOURCE_NAME, now.date(), webrender.answer_of)
+        except Exception as exc:
+            log.info("Prayer times: could not read the masjid's table (%s)", _reason(exc))
+            midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if pagetable.parse(saved, midnight, midnight + timedelta(days=1)):
+                raise
+        return ics.fetch(address)
+    return fetch
+
+
+def _fetcher_for(url: str, where=None, saved: str = "", now: datetime | None = None):
     """The reader for this address.
 
     A mosque website is tried as a timetable API first and as a calendar
@@ -745,6 +774,8 @@ def _fetcher_for(url: str, where=None):
     certain, which is why the masjid picker shows what was read before it is
     kept.
     """
+    if url == WATERLOO_MASJID_ICS:
+        return _table_first(saved, now or datetime.now())
     if mawaqit.looks_like(url):
         return _asked("ask", mawaqit.fetch)
     if prayersconnect.looks_like(url):
@@ -873,6 +904,7 @@ def _fetcher_for(url: str, where=None):
 # Which module reads a cache, by the name it wrote into it.
 _READERS = {
     "mawaqit": mawaqit,
+    pagetable.SOURCE: pagetable,
     "prayersconnect": prayersconnect,
     "scrape": scrape,
 }
@@ -1080,8 +1112,10 @@ class Loader:
     # --- back on the UI thread ---------------------------------------------
     def _done(self, found, status: str) -> None:
         self.loading = False
-        # Nothing for today, or the load itself blew up: one more in a row.
-        self.failures = 0 if on_day(found or (), datetime.now().date()) else self.failures + 1
+        # Nothing for today, a source that did not answer, or the load itself
+        # blew up: one more in a row, so a site that is down is asked less often.
+        good = on_day(found or (), datetime.now().date()) and UNREACHED not in status
+        self.failures = 0 if good else self.failures + 1
         if found is None:
             return
         previous = list(self.prayers or ())

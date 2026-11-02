@@ -9,9 +9,9 @@ Linux desktops. This drives whichever is there, headless -- no window, a
 throwaway profile, gone when it is done.
 
 It is a last resort and behaves like one. It runs only after the plain page has
-failed, one page at a time, on a worker, with a hard time limit and the whole
-process tree killed at the end. If there is no browser it says so and the caller
-carries on without it.
+failed, or for a page whose script holds the timetable, one page at a time, on a
+worker, with a hard time limit and the whole process tree killed at the end. If
+there is no browser it says so and the caller carries on without it.
 
 The conversation is the Chrome DevTools Protocol over a WebSocket. There is no
 library for that in the standard library, and none is worth adding for what is
@@ -287,11 +287,12 @@ def _close(browser_ws: str, process: subprocess.Popen | None, profile: str) -> N
 
 
 def render(url: str, screenshot: bool = False, total: float = TOTAL_TIMEOUT,
-           settle: float = SETTLE_TIMEOUT) -> dict:
-    """{"html": str, "text": str, "url": str, "png": bytes|None} for a page.
+           settle: float = SETTLE_TIMEOUT, ask: str = "") -> dict:
+    """{"html": str, "text": str, "url": str, "png": bytes|None, "answer": any} for a page.
 
     Raises RenderError when there is no browser or the page will not render.
-    The page has run its scripts; `html` is the document as they left it.
+    The page has run its scripts; `html` is the document as they left it, and
+    `answer` is what the JavaScript expression `ask` came to, or None.
     """
     exe = find_browser()
     if not exe:
@@ -363,7 +364,8 @@ def render(url: str, screenshot: bool = False, total: float = TOTAL_TIMEOUT,
             shot = page.call("Page.captureScreenshot",
                              {"format": "png", "captureBeyondViewport": True}, wait=20)
             png = base64.b64decode(shot.get("data", "")) or None
-        return {"html": html, "text": text, "url": final, "png": png}
+        answer = page.evaluate(ask) if ask else None
+        return {"html": html, "text": text, "url": final, "png": png, "answer": answer}
     except RenderError:
         raise
     except Exception as exc:
@@ -383,3 +385,8 @@ def html_of(url: str, total: float = 25.0) -> tuple[str, str]:
     if page["url"].startswith(("chrome-error:", "edge-error:")):
         raise RenderError("the page could not be reached")     # the browser's own error page
     return page["url"], page["html"]
+
+
+def answer_of(url: str, question: str, total: float = 25.0):
+    """What a page's own scripts say to `question`, a JavaScript expression."""
+    return render(url, total=total, ask=question)["answer"]

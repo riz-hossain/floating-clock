@@ -26,7 +26,7 @@ from datetime import date
 
 os.environ["FLOATING_CLOCK_HOME"] = tempfile.mkdtemp(prefix="floating-clock-check-")
 
-from floating_clock import scrape, webrender  # noqa: E402
+from floating_clock import pagetable, scrape, webrender  # noqa: E402
 
 failures: list[str] = []
 
@@ -55,6 +55,10 @@ setTimeout(function () {
     return "<p>" + r[0] + " Athan " + r[1] + ":" + two(r[2]) + pm + " Iqama: " + r[3] + ":" + two(r[4]) + pm + "</p>";
   }).join("");
 }, 400);
+self.PrayerTimes = {getMonthlyPrayerTimes: function (y, m) {
+  return [{year: y, month: m, date: 1, fajr_iqamah: "7:05", dhuhr_iqamah: "1:05, 2:05",
+           asr_iqamah: "3:05", magrib_iqamah: "5:05", isha_iqamah: "7:05"}];
+}};
 </script></body></html>"""
 
 
@@ -92,6 +96,12 @@ check("and that is read as the five iqamas",
 got = json.loads(scrape.fetch(url, date.today(), render=webrender.html_of))
 check("through fetch, a page that reads only once drawn is read", got["iqamah"]["Isha"] == "21:00", str(got))
 check("named for its title", got["name"] == "Script Masjid", got.get("name", ""))
+
+print("a page whose script holds the year")
+table = json.loads(pagetable.fetch(url, "Script Masjid", date(2026, 12, 1), webrender.answer_of))["days"]
+check("the page's own script is asked, across the new year",
+      table.get("2027-01-01", {}).get("Fajr") == "07:05" and table["2026-12-01"]["Dhuhr"] == "13:05", str(table)[:200])
+check("a page without that script has no answer", webrender.answer_of(url, "NoSuchScript.times()") is None)
 
 print("nothing is left running")
 time.sleep(1.0)
