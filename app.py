@@ -181,7 +181,8 @@ class FloatingClock(SettingsUI):
         # which the settings page shows. Shared with the Qt host, which owns
         # one of these too.
         self.routines = routines_mod.Runner(
-            self.s, on_status=self._routine_status, on_warn=self._adhan_warning)
+            self.s, on_status=self._routine_status, on_warn=self._adhan_warning,
+            base_dir=cfg.config_dir())
         self._last_heartbeat: datetime | None = None
         self._loop_errors: dict[str, float] = {}
         self.peek = None
