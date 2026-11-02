@@ -250,7 +250,8 @@ class QtClock:
             on_ready=self._prayers_ready,
         )
         self.routines = routines_mod.Runner(
-            self.s, on_status=self._routine_status, on_warn=self._adhan_warning)
+            self.s, on_status=self._routine_status, on_warn=self._adhan_warning,
+            base_dir=cfg.config_dir())
 
         self.card = CardWindow(self)
         self.scale = self.card.devicePixelRatio() if self.card.devicePixelRatio() else 1.0

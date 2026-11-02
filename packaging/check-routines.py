@@ -325,6 +325,41 @@ check("right after it fires, it is still something to stop", runner.stoppable() 
 runner.poll([due_now(lead_minutes=999)], datetime.now() + timedelta(seconds=routines.STOP_WINDOW_S + 5))
 check("long after, that offer has quietly expired", runner.stoppable() is None)
 
+# --- a restart inside the grace window ------------------------------------------------------
+print("a clock restarted just after a prayer fired does not fire it again")
+folder = tempfile.mkdtemp(prefix="check-routines-")
+armed = settings(prayer_routines_enabled=True, prayer_routines_hooks={"Fajr": "https://x/"})
+item = due_now()
+runner, calls = calling({"settings": armed, "base_dir": folder})
+runner.poll([item], datetime.now())
+check("the first run fires it", len(calls) == 1, str(calls))
+runner, calls = calling({"settings": armed, "base_dir": folder})
+runner.poll([item], datetime.now())
+check("the next run knows it already did", not calls, str(calls))
+runner, calls = calling({"settings": settings(prayer_local_enabled=True, prayer_local_media_default="a.mp3"),
+                         "base_dir": folder})
+runner.poll([item], datetime.now())
+check("which says nothing about another kind for the same prayer", len(calls) == 1, str(calls))
+
+folder = tempfile.mkdtemp(prefix="check-routines-")
+local = settings(prayer_local_enabled=True, prayer_local_media_default="a.mp3", prayer_warn_seconds=30)
+item = due_now(lead_minutes=10.1)
+runner, calls = calling({"settings": local, "base_dir": folder})
+runner._stop_playback = lambda: None
+runner.poll([item], datetime.now())
+runner.stop_now()
+runner, calls = calling({"settings": local, "base_dir": folder})
+runner.poll([item], item.iqama - timedelta(minutes=10) + timedelta(seconds=5))
+check("a prayer told to stop stays stopped across a restart", not calls, str(calls))
+
+folder = tempfile.mkdtemp(prefix="check-routines-")
+with open(os.path.join(folder, routines.MARKS_NAME), "w", encoding="utf-8") as fh:
+    fh.write("not json")
+item = due_now()
+runner, calls = calling({"settings": armed, "base_dir": folder})
+runner.poll([item], datetime.now())
+check("a damaged file costs nothing: the prayer still fires", len(calls) == 1, str(calls))
+
 print()
 if failures:
     print("%d check(s) FAILED: %s" % (len(failures), "; ".join(failures)))

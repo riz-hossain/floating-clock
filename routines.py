@@ -30,7 +30,9 @@ Tk and Qt is how a status line gets back to the settings page, which is what
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 from datetime import datetime, timedelta
 
@@ -47,6 +49,8 @@ KINDS = (HOOK, CAST, LOCAL)
 # Three kinds, seven prayers, a couple of days: sixty is well clear of a
 # day's worth and still small enough that the set never grows without bound.
 KEEP_MARKS = 60
+# Those marks, saved: a clock restarted inside a prayer's grace window must not fire it again.
+MARKS_NAME = "prayer-fired.json"
 # How long "stop" stays offered after a prayer was last warned about or fired: a guess, since
 # the clock does not track exactly when a cast or a local file finishes playing, generous enough
 # to cover a normal adhan comfortably without leaving the option to stop something forever.
@@ -73,8 +77,9 @@ def media_table(settings, prefix: str = "prayer_cast") -> dict:
 class Runner:
     """Fires each prayer's routine and cast as its moment arrives."""
 
-    def __init__(self, settings: dict, on_status=None, on_warn=None) -> None:
+    def __init__(self, settings: dict, on_status=None, on_warn=None, base_dir: str = "") -> None:
         self.s = settings
+        self._marks_path = os.path.join(base_dir, MARKS_NAME) if base_dir else ""
         # on_status(kind, text) -- the host marshals to its own UI thread.
         self.on_status = on_status or (lambda kind, text: None)
         # on_warn(item, kinds, seconds_left) -- a prayer is about to fire; the host shows
@@ -82,11 +87,23 @@ class Runner:
         self.on_warn = on_warn or (lambda item, kinds, seconds_left: None)
         self.status = {HOOK: "", CAST: "", LOCAL: ""}
         # One set for all three kinds; hook_key's prefix keeps them apart.
-        self._fired: set[str] = set()
+        self._fired: set[str] = self._read_marks()
         self._warned: set[str] = set()          # item.key -> already warned about today
         # item.key -> (item, until) for whatever a warning or a firing said "stop" could still
         # reach; stop_now() acts on all of these and clears them, poll() drops the stale ones.
         self._pending: dict[str, tuple] = {}
+
+    def _read_marks(self) -> set:
+        if not self._marks_path:
+            return set()
+        try:
+            return prayer_mod.prune_keys(json.loads(prayer_mod._read(self._marks_path)), datetime.now())
+        except (ValueError, TypeError):
+            return set()
+
+    def _save_marks(self) -> None:
+        if self._marks_path:
+            prayer_mod._write(self._marks_path, json.dumps(sorted(self._fired)))
 
     # --- the loop ----------------------------------------------------------
     def poll(self, prayers, now: datetime) -> None:
@@ -130,6 +147,7 @@ class Runner:
             # eleven seconds to fail must not be started again each second in
             # between.
             self._fired.add(prayer_mod.hook_key(item, kind))
+            self._save_marks()
             if kind in (CAST, LOCAL):
                 # A routine, once fired, is out of reach; a cast or a local
                 # play is this clock's own doing and can still be stopped.
@@ -209,6 +227,7 @@ class Runner:
         for item, _until in list(self._pending.values()):
             for kind in KINDS:
                 self._fired.add(prayer_mod.hook_key(item, kind))
+        self._save_marks()
         self._pending.clear()
         self._stop_playback()
 
