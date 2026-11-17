@@ -19,10 +19,12 @@ import logging
 import os
 import secrets
 import shutil
+import smtplib
 import sqlite3
 import sys
 import tempfile
 from datetime import date, datetime, time as dtime, timedelta
+from email.message import EmailMessage
 from glob import glob
 from urllib.parse import urlsplit
 
@@ -448,6 +450,33 @@ def save_report(base: str, days: list[date], body: str) -> str:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("<!doctype html><meta charset='utf-8'>" + body)
     return path
+
+
+# The sending Gmail address and its app password, in Windows Credential Manager.
+MAIL_KEY = "kids-mail"
+SMTP_HOST, SMTP_PORT = "smtp.gmail.com", 465
+
+
+def send_gmail(sender: str, password: str, to: str, subject: str, body: str,
+               host: str = SMTP_HOST, port: int = SMTP_PORT) -> None:
+    """Send through Gmail with an app password: nothing to install or sign in to."""
+    msg = EmailMessage()
+    msg["From"], msg["To"], msg["Subject"] = sender, to, subject
+    msg.set_content("This report needs a mail app that shows HTML.")
+    msg.add_alternative("<!doctype html><meta charset='utf-8'>" + body, subtype="html")
+    with smtplib.SMTP_SSL(host, port, timeout=30) as server:
+        # Google shows the app password in groups of four; the spaces are not part of it.
+        server.login(sender, password.replace(" ", ""))
+        server.send_message(msg)
+
+
+def send_report(to: str, subject: str, body: str, credentials) -> str:
+    """Gmail when a sender is stored, else Outlook. Says which one sent it."""
+    if credentials and credentials[0] and credentials[1]:
+        send_gmail(credentials[0], credentials[1], to, subject, body)
+        return "Gmail"
+    send_outlook(to, subject, body)
+    return "Outlook"
 
 
 def send_outlook(to: str, subject: str, body: str) -> None:

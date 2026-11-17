@@ -152,6 +152,40 @@ check("an unreadable browser is said", "Edge: OSError" in body)
 path = kids.save_report(base, [day], body)
 check("a copy is saved", os.path.exists(path), path)
 
+print("sending")
+sent: list[tuple] = []
+
+
+class FakeSMTP:
+    def __init__(self, host, port, timeout=None):
+        sent.append(("connect", host, port))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def login(self, user, password):
+        sent.append(("login", user, password))
+
+    def send_message(self, msg):
+        sent.append(("message", msg["From"], msg["To"], msg["Subject"],
+                     msg.get_body(("html",)).get_content()))
+
+
+outlook_calls: list[tuple] = []
+kids.smtplib.SMTP_SSL = FakeSMTP
+kids.send_outlook = lambda *args: outlook_calls.append(args)
+via = kids.send_report("parent@example.com", subject, body, ("sender@example.com", "abcd efgh ijkl mnop"))
+check("Gmail is used when a sender is stored", via == "Gmail" and not outlook_calls, via)
+check("connects to Gmail over SSL", sent[0] == ("connect", "smtp.gmail.com", 465), sent[:1])
+check("app password sent without its spaces", sent[1] == ("login", "sender@example.com", "abcdefghijklmnop"), sent[1])
+check("the report is the HTML body", sent[2][1:4] == ("sender@example.com", "parent@example.com", subject)
+      and "roblox.com" in sent[2][4])
+via = kids.send_report("parent@example.com", subject, body, None)
+check("Outlook without a sender", via == "Outlook" and len(outlook_calls) == 1, via)
+
 print()
 if failures:
     print("%d check(s) failed: %s" % (len(failures), ", ".join(failures)))
