@@ -28,7 +28,7 @@ SLIDE_STEPS = 12
 SLIDE_INTERVAL = 12
 
 KIND_LABEL = {"meeting": "MEETING", "alarm": "ALARM", "timer": "TIMER",
-              "prayer": "PRAYER", "adhan": "ADHAN"}
+              "prayer": "PRAYER", "adhan": "ADHAN", "notice": "SCREEN TIME"}
 
 
 @dataclass
@@ -244,6 +244,8 @@ class Toast:
             labels.append(("dismiss", "Dismiss", False))
         elif self.fired.kind == "adhan":
             labels.append(("stop", "Stop", True))
+        elif self.fired.kind == "notice":
+            labels.append(("dismiss", "OK", True))
         else:
             labels.append(("dismiss", "Dismiss", True))
             labels.append(("snooze", "Snooze 5m", False))

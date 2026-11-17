@@ -140,6 +140,15 @@ DEFAULTS: dict = {
     # Give every company seen in an Outlook meeting (by the organiser's email
     # domain) an entry of its own, with its website's icon as the mark.
     "auto_org_marks": True,
+    # Kids' screen time (kids.py): time per program, a daily limit per game
+    # ("Name.exe=minutes, ..."; 0 blocks it), and the days before today
+    # emailed through Outlook to kids_report_to. The PIN guards the Kids page
+    # and Exit; it is stored salted and hashed.
+    "kids_enabled": False,
+    "kids_pin": "",
+    "kids_limits": "RobloxPlayerBeta.exe=60",
+    "kids_report_to": "",
+    "kids_reported_through": "",
 }
 
 

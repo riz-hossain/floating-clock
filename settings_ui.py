@@ -19,7 +19,7 @@ import webbrowser
 from datetime import datetime
 
 from . import (
-    alerts, outlook, palette as pal, prayer as prayer_mod, render,
+    alerts, kids as kids_mod, outlook, palette as pal, prayer as prayer_mod, render,
     settings as cfg, themes, widgets as w, win32util as w32,
 )
 from . import __version__
@@ -40,6 +40,7 @@ PAGES = (
     ("prayer", "Prayer", "moon", "Iqama times from your masjid, and a reminder before each one."),
     ("alarms", "Alarms", "bell", "Ring at a set time, once or on chosen days."),
     ("timers", "Timers", "timer", "Count down from a length you type."),
+    ("kids", "Kids", "lock", "Screen time, game limits and a daily report, behind a parent PIN."),
 )
 # Legacy numeric tab indices (menu callers used to pass these); keys are preferred.
 PAGE_INDEX = {0: "clock", 1: "behaviour", 2: "meetings", 3: "alarms", 4: "timers", 5: "calendars"}
@@ -199,6 +200,7 @@ class SettingsUI(CalendarsPage):
         is the one that gets thrown away.
         """
         self._flush_fields()
+        self._kids_unlocked = False     # the PIN is asked again next time
         win.destroy()
 
     def _flush_fields(self) -> None:
@@ -1806,6 +1808,129 @@ class SettingsUI(CalendarsPage):
         self._refresh_agenda()
 
     # --- alarms page -------------------------------------------------------
+    # --- kids page ---------------------------------------------------------
+    def _pin_field(self, row) -> w.Field:
+        field = w.Field(row, self._ui, width=10)
+        field.entry.configure(show="•")
+        field.pack(side="left")
+        return field
+
+    def _page_kids(self, page: tk.Frame) -> None:
+        ui = self._ui
+        stored = self.s.get("kids_pin", "")
+        if stored and not getattr(self, "_kids_unlocked", False):
+            card = self._card(page, "Locked", "Type the parent PIN to see or change these settings.")
+            row = card.row(pady=6)
+            field = self._pin_field(row)
+            note = w.label(row, ui, "", 9, colour=ui.p.muted)
+
+            def unlock(_event=None) -> None:
+                if kids_mod.pin_matches(field.get(), stored):
+                    self._kids_unlocked = True
+                    self._restyle_settings()
+                else:
+                    field.clear()
+                    note.configure(text="Wrong PIN")
+
+            w.Button(row, ui, "Unlock", command=unlock, kind="primary").pack(side="left", padx=(ui.px(8), 0))
+            note.pack(side="left", padx=(ui.px(10), 0))
+            field.entry.bind("<Return>", unlock)
+            return
+
+        card = self._card(page, "Screen time",
+                          "Checks the program in front every 5 seconds, only while the clock runs. "
+                          "Nothing leaves this PC except the report.")
+        self.var_kids = tk.BooleanVar(value=bool(self.s.get("kids_enabled")))
+        self._switch_row(
+            card, "Track this PC", self.var_kids, self._toggle_kids,
+            "Time per program and game, the websites in Chrome, Edge, Brave and Firefox history, "
+            "and any time the clock was closed while the PC was on.",
+        )
+
+        card = self._card(page, "Game limits",
+                          "Minutes a day per game, by its program name. 0 blocks it. A warning comes "
+                          "at 10 and 2 minutes left, then the game is closed.")
+        row = card.row(pady=6)
+        limits = w.Field(row, ui, width=40, initial=self.s.get("kids_limits", ""),
+                         placeholder="RobloxPlayerBeta.exe=60")
+        today = w.label(card.body, ui, self._kids_today_text(), 9, colour=ui.p.muted)
+
+        def save_limits(_event=None) -> None:
+            self.s["kids_limits"] = limits.get().strip()
+            if today.winfo_exists():
+                today.configure(text=self._kids_today_text())
+
+        # The button first: a control packed after an expanding field gets no room.
+        w.Button(row, ui, "Save", command=save_limits).pack(side="right", padx=(ui.px(8), 0))
+        limits.pack(side="left", fill="x", expand=True)
+        limits.entry.bind("<Return>", save_limits)
+        today.pack(anchor="w", pady=(ui.px(2), ui.px(4)))
+        self._on_close_save(save_limits)
+
+        card = self._card(page, "Daily report",
+                          "Each whole day is emailed through Outlook on this PC: at the first start "
+                          "after it, or at midnight while the clock runs. A copy is kept in the "
+                          "clock's kids\\reports folder.")
+        row = card.row(pady=6)
+        email = w.Field(row, ui, width=30, initial=self.s.get("kids_report_to", ""),
+                        placeholder="Your email address")
+        note = w.label(card.body, ui, "", 9, colour=ui.p.muted, wraplength=ui.px(500), justify="left")
+
+        def save_email(_event=None) -> None:
+            self.s["kids_report_to"] = email.get().strip()
+
+        def send_now() -> None:
+            save_email()
+            if not (self.s.get("kids_enabled") and self.s["kids_report_to"]):
+                note.configure(text="Turn tracking on and type an address first.")
+                return
+            note.configure(text="Sending today so far…")
+            self.send_kids_report(days=[datetime.now().date()],
+                                  on_done=lambda text: note.winfo_exists() and note.configure(text=text))
+
+        w.Button(row, ui, "Send today so far", command=send_now).pack(side="right", padx=(ui.px(8), 0))
+        email.pack(side="left", fill="x", expand=True)
+        email.entry.bind("<Return>", save_email)
+        email.entry.bind("<FocusOut>", save_email, add="+")
+        note.pack(anchor="w", pady=(ui.px(2), ui.px(4)))
+        self._on_close_save(save_email)
+
+        card = self._card(page, "Parent PIN",
+                          "Asked for to open this page, to exit the clock, and to stop it starting "
+                          "with Windows." if stored else
+                          "Without one, anyone at this PC can change the limits or exit the clock.")
+        row = card.row(pady=6)
+        field = self._pin_field(row)
+        pin_note = w.label(row, ui, "", 9, colour=ui.p.muted)
+
+        def set_pin(_event=None) -> None:
+            pin = field.get().strip()
+            if len(pin) < 4:
+                pin_note.configure(text="At least 4 characters")
+                return
+            self.s["kids_pin"] = kids_mod.hash_pin(pin)
+            self._kids_unlocked = True
+            field.clear()
+            pin_note.configure(text="PIN saved")
+
+        w.Button(row, ui, "Change PIN" if stored else "Set PIN", command=set_pin,
+                 kind="primary").pack(side="left", padx=(ui.px(8), 0))
+        pin_note.pack(side="left", padx=(ui.px(10), 0))
+        field.entry.bind("<Return>", set_pin)
+
+    def _kids_today_text(self) -> str:
+        monitor = getattr(self, "kids", None)
+        if monitor is None:
+            return "Tracking is off." if not self.s.get("kids_enabled") else ""
+        used = ["%s %d of %d min" % (kids_mod.friendly(game), monitor.used_minutes(game), minutes)
+                for game, minutes in kids_mod.parse_limits(self.s.get("kids_limits")).items()]
+        return "Today: " + (", ".join(used) if used else "no limits set")
+
+    def _toggle_kids(self) -> None:
+        self.s["kids_enabled"] = bool(self.var_kids.get())
+        if self.s["kids_enabled"]:
+            self.start_kids()          # turning it off stops it at its next check
+
     def _page_alarms(self, page: tk.Frame) -> None:
         ui = self._ui
         card = self._card(page, "New alarm")
