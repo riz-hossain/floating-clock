@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import queue
+import smtplib
 import subprocess
 import sys
 import threading
@@ -24,7 +25,7 @@ from . import (
     alerts, daybar, kids as kids_mod, meetings as meetings_mod, orgs as orgs_mod, outlook,
     peek as peek_mod, prayer as prayer_mod, render, routines as routines_mod,
     settings as cfg, themes, toast as toast_mod, tray as tray_mod,
-    win32util as w32,
+    vault, win32util as w32,
 )
 from . import __version__, logsetup
 from .settings_ui import SettingsUI
@@ -1480,21 +1481,30 @@ class FloatingClock(SettingsUI):
             except Exception as exc:
                 log.exception("Screen time report failed")
                 result = "Could not build the report: %s" % exc
+                sent = False
             else:
+                sender = vault.read(kids_mod.MAIL_KEY)
                 try:
-                    kids_mod.send_outlook(to, subject, body)
-                    result = ""
+                    result = "Sent to %s through %s." % (
+                        to, kids_mod.send_report(to, subject, body, sender))
+                    sent = True
+                except smtplib.SMTPAuthenticationError:
+                    log.warning("Screen time report not emailed: Gmail refused the sign-in")
+                    result = ("Gmail refused the address or app password. Saved to %s" % path)
+                    sent = False
                 except Exception as exc:
                     log.warning("Screen time report not emailed: %s", exc)
-                    result = "Outlook would not send it (%s). Saved to %s" % (exc.__class__.__name__, path)
-            self.root.after(0, done, result)
+                    result = "%s would not send it (%s). Saved to %s" % (
+                        "Gmail" if sender else "Outlook", exc.__class__.__name__, path)
+                    sent = False
+            self.root.after(0, done, result, sent)
 
-        def done(result: str) -> None:
-            if not result and scheduled:
+        def done(result: str, sent: bool) -> None:
+            if sent and scheduled:
                 self.s["kids_reported_through"] = days[-1].isoformat()
-            log.info("Screen time report for %s: %s", days[-1], result or "sent")
+            log.info("Screen time report for %s: %s", days[-1], result)
             if on_done:
-                on_done(result or "Sent to %s." % to)
+                on_done(result)
 
         threading.Thread(target=work, name="kids-report", daemon=True).start()
 

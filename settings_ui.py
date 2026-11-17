@@ -25,7 +25,7 @@ from . import (
 from . import __version__
 from . import (
     cast as cast_mod, localaudio, masjids as masjids_mod, pickerflow as flow,
-    routines as routines_mod, timeline, whereami,
+    routines as routines_mod, timeline, vault, whereami,
 )
 from .timetext import clock_text, parse_clock_time
 from .calendars_ui import CalendarsPage
@@ -1868,9 +1868,8 @@ class SettingsUI(CalendarsPage):
         self._on_close_save(save_limits)
 
         card = self._card(page, "Daily report",
-                          "Each whole day is emailed through Outlook on this PC: at the first start "
-                          "after it, or at midnight while the clock runs. A copy is kept in the "
-                          "clock's kids\\reports folder.")
+                          "Each whole day is emailed at the first start after it, or at midnight "
+                          "while the clock runs. A copy is kept in the clock's kids\\reports folder.")
         row = card.row(pady=6)
         email = w.Field(row, ui, width=30, initial=self.s.get("kids_report_to", ""),
                         placeholder="Your email address")
@@ -1894,6 +1893,40 @@ class SettingsUI(CalendarsPage):
         email.entry.bind("<FocusOut>", save_email, add="+")
         note.pack(anchor="w", pady=(ui.px(2), ui.px(4)))
         self._on_close_save(save_email)
+
+        card = self._card(page, "Send from Gmail",
+                          "A Gmail address and an app password for it (myaccount.google.com/"
+                          "apppasswords; needs 2-Step Verification). Best a new Gmail just for this: "
+                          "an app password can read that mailbox. Without one, Outlook on this PC "
+                          "sends it.")
+        stored = vault.read(kids_mod.MAIL_KEY)
+        row = card.row(pady=6)
+        sender = w.Field(row, ui, width=26, initial=stored[0] if stored else "",
+                         placeholder="sender@gmail.com")
+        password = w.Field(row, ui, width=18)     # no placeholder: it would show as dots
+        sender_note = w.label(card.body, ui,
+                              "Sending from %s." % stored[0] if stored else "No sender: Outlook is used.",
+                              9, colour=ui.p.muted)
+
+        def save_sender() -> None:
+            address, secret = sender.get().strip(), password.get().strip()
+            if not address:
+                vault.delete(kids_mod.MAIL_KEY)
+                sender_note.configure(text="Sender removed: Outlook is used.")
+            elif not secret:
+                sender_note.configure(text="Type the app password too.")
+            elif vault.store(kids_mod.MAIL_KEY, address, secret):
+                password.clear()
+                sender_note.configure(text="Sending from %s. Try it with Send today so far." % address)
+            else:
+                sender_note.configure(text="Windows would not save the password.")
+
+        w.Button(row, ui, "Save", command=save_sender).pack(side="right", padx=(ui.px(8), 0))
+        sender.pack(side="left", fill="x", expand=True)
+        password.pack(side="left", padx=(ui.px(8), 0))
+        password.entry.configure(show="•")
+        password.entry.bind("<Return>", lambda _e: save_sender())
+        sender_note.pack(anchor="w", pady=(ui.px(2), ui.px(4)))
 
         card = self._card(page, "Parent PIN",
                           "Asked for to open this page, to exit the clock, and to stop it starting "
