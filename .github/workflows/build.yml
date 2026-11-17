@@ -147,6 +147,12 @@ jobs:
         env:
           PYTHONPATH: stage
         run: python packaging/check-routines.py
+      - name: Screen time counts, limits games, and reports the gaps
+        # Fakes for the foreground program and for closing a game, so no
+        # Windows is needed and nothing real is closed.
+        env:
+          PYTHONPATH: stage
+        run: python packaging/check-kids.py
       - name: A page whose times a script writes in
         # A real headless Chrome on a page served from this machine: the
         # browser driver, and that nothing is left running afterwards.

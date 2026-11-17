@@ -21,7 +21,7 @@ from tkinter import ttk
 
 from . import (
     hovercard, popupmenu,
-    alerts, daybar, meetings as meetings_mod, orgs as orgs_mod, outlook,
+    alerts, daybar, kids as kids_mod, meetings as meetings_mod, orgs as orgs_mod, outlook,
     peek as peek_mod, prayer as prayer_mod, render, routines as routines_mod,
     settings as cfg, themes, toast as toast_mod, tray as tray_mod,
     win32util as w32,
@@ -186,6 +186,7 @@ class FloatingClock(SettingsUI):
         self._last_heartbeat: datetime | None = None
         self._loop_errors: dict[str, float] = {}
         self.peek = None
+        self.kids: kids_mod.Monitor | None = None
         self._positioned = False
         self.tray = None
 
@@ -218,6 +219,9 @@ class FloatingClock(SettingsUI):
         self._start_calendar()
         self.prayer_loader.start()
         self._poll_alerts()
+        self.start_kids()
+        # Late enough for Outlook and the network after a Windows start.
+        self.root.after(30_000, self.send_kids_report)
         self._autosave()
         if cfg.LOAD_FAILED:
             self.root.after(3000, self._settings_unreadable)
@@ -732,6 +736,9 @@ class FloatingClock(SettingsUI):
 
     def _toggle_startup(self) -> None:
         wanted = bool(self.var_startup.get())
+        if not wanted and not self.parent_ok("stop the clock starting with Windows"):
+            self.var_startup.set(True)
+            return
         if not set_startup(wanted, startup_command()):
             self.var_startup.set(startup_enabled())
 
@@ -1079,8 +1086,9 @@ class FloatingClock(SettingsUI):
                 elif pressed == HOTKEY_SHOW:
                     self._reset_position()
                 elif pressed == HOTKEY_QUIT:
-                    self.quit()
-                    return
+                    if self.parent_ok("exit the clock"):
+                        self.quit()
+                        return
         except queue.Empty:
             pass
         except Exception:
@@ -1401,6 +1409,94 @@ class FloatingClock(SettingsUI):
     def refresh_prayers(self, force: bool = True) -> None:
         """Settings page hook: fetch the calendar again now."""
         self.prayer_loader.refresh(force=force)
+
+    # --- kids' screen time (kids.py) ----------------------------------------
+    def parent_ok(self, doing: str) -> bool:
+        """True when there is no parent PIN to ask for, or it was typed right."""
+        stored = self.s.get("kids_pin", "")
+        if not (self.s.get("kids_enabled") and stored):
+            return True
+        from tkinter import simpledialog
+
+        typed = simpledialog.askstring("Parent PIN", "Parent PIN to %s:" % doing,
+                                       show="•", parent=self.root)
+        return bool(typed) and kids_mod.pin_matches(typed, stored)
+
+    def start_kids(self) -> None:
+        if self.kids is not None or not self.s.get("kids_enabled") or sys.platform != "win32":
+            return
+        now = datetime.now()
+        self.kids = kids_mod.Monitor(
+            cfg.config_dir(), now, foreground=kids_mod.foreground_exe,
+            idle_seconds=kids_mod.idle_seconds, kill=kids_mod.kill,
+            boot_time=kids_mod.boot_time(), last_shutdown=kids_mod.last_shutdown())
+        log.info("Screen time on: limits %s", kids_mod.parse_limits(self.s.get("kids_limits")))
+        self._poll_kids()
+
+    def _poll_kids(self) -> None:
+        if self.kids is None:
+            return
+        if not self.s.get("kids_enabled"):
+            self.kids.save()
+            self.kids = None
+            return
+        try:
+            for said in self.kids.poll(datetime.now(), kids_mod.parse_limits(self.s.get("kids_limits"))):
+                if said[0] == "new_day":
+                    self.send_kids_report()
+                elif said[0] == "warn":
+                    self._show_toast(alerts.Fired(
+                        kind="notice", title="%s: %d min left today" % (kids_mod.friendly(said[1]), said[2]),
+                        detail="It will close when today's time is used up.", key="kids:%s:%s" % said[1:]))
+                elif said[0] == "stopped" and not any(t.fired.key == "kids:up" for t in self._toasts):
+                    self._show_toast(alerts.Fired(
+                        kind="notice", title="%s time is up for today" % kids_mod.friendly(said[1]),
+                        detail="%d minutes a day. It was closed." % said[2], key="kids:up"))
+        except Exception:
+            self._loop_error("screen time")
+        self._rearm(kids_mod.POLL_S * 1000, self._poll_kids)
+
+    def send_kids_report(self, days=None, on_done=None) -> None:
+        """Email the whole days not yet reported, off the Tk thread.
+
+        `days` sends those instead (the settings page's Send now) and does not
+        move what has been reported. Saved as a file either way; marked sent
+        only once Outlook took it, so a failure is retried at the next start.
+        """
+        to = (self.s.get("kids_report_to") or "").strip()
+        if not self.s.get("kids_enabled") or not to:
+            return
+        base, limits = cfg.config_dir(), kids_mod.parse_limits(self.s.get("kids_limits"))
+        scheduled = days is None
+        if scheduled:
+            days = kids_mod.due_days(base, self.s.get("kids_reported_through", ""), datetime.now().date())
+        if not days:
+            return
+
+        def work() -> None:
+            try:
+                subject, body = kids_mod.build_report(base, days, limits)
+                path = kids_mod.save_report(base, days, body)
+            except Exception as exc:
+                log.exception("Screen time report failed")
+                result = "Could not build the report: %s" % exc
+            else:
+                try:
+                    kids_mod.send_outlook(to, subject, body)
+                    result = ""
+                except Exception as exc:
+                    log.warning("Screen time report not emailed: %s", exc)
+                    result = "Outlook would not send it (%s). Saved to %s" % (exc.__class__.__name__, path)
+            self.root.after(0, done, result)
+
+        def done(result: str) -> None:
+            if not result and scheduled:
+                self.s["kids_reported_through"] = days[-1].isoformat()
+            log.info("Screen time report for %s: %s", days[-1], result or "sent")
+            if on_done:
+                on_done(result or "Sent to %s." % to)
+
+        threading.Thread(target=work, name="kids-report", daemon=True).start()
 
     # --- alerts ------------------------------------------------------------
     def _poll_alerts(self) -> None:
@@ -1746,7 +1842,8 @@ class FloatingClock(SettingsUI):
             pm.separator(),
             pm.command("Reset position", self._reset_position,
                        self._hotkey_text(HOTKEY_SHOW, "Ctrl+Alt+K")),
-            pm.command("Exit", self.quit, self._hotkey_text(HOTKEY_QUIT, "Ctrl+Alt+Q")),
+            pm.command("Exit", lambda: self.parent_ok("exit the clock") and self.quit(),
+                       self._hotkey_text(HOTKEY_QUIT, "Ctrl+Alt+Q")),
             pm.separator(),
             pm.command("Floating Clock %s" % __version__, lambda: None, enabled=False),
         ]
@@ -1774,6 +1871,8 @@ class FloatingClock(SettingsUI):
         self.s["x"], self.s["y"] = self._position()
         cfg.save(self.s)
         self.scheduler.save()
+        if self.kids is not None:
+            self.kids.save()
         self._close_panel()
         if self.peek is not None:
             self.peek.cancel_timer()

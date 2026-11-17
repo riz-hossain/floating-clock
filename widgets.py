@@ -263,6 +263,11 @@ def _draw_icon(draw: ImageDraw.ImageDraw, name: str, S: int, colour: str,
         cut = S * 0.30
         draw.ellipse((pad + cut, pad - cut * 0.35, S - pad + cut * 1.1, S - pad + cut * 0.35),
                      fill=bg_fill)
+    elif name == "lock":
+        draw.arc((S * 0.30, S * 0.08, S * 0.70, S * 0.56), 180, 360, fill=colour, width=stroke)
+        draw.line((S * 0.30, S * 0.32, S * 0.30, S * 0.44), fill=colour, width=stroke)
+        draw.line((S * 0.70, S * 0.32, S * 0.70, S * 0.44), fill=colour, width=stroke)
+        draw.rounded_rectangle((S * 0.18, S * 0.44, S * 0.82, S - pad), S * 0.08, outline=colour, width=stroke)
     elif name == "chevron":
         draw.line((S * 0.25, S * 0.40, cx, S * 0.65), fill=colour, width=stroke)
         draw.line((cx, S * 0.65, S * 0.75, S * 0.40), fill=colour, width=stroke)

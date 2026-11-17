@@ -66,7 +66,7 @@ def _check() -> int:
     try:
         from . import (                                    # noqa: F401
             alerts, app, caldav, cast, daybar, dpt, google_oauth, hovercard,
-            ics, icon, meetings, orgs, outlook, palette, peek, popupmenu,
+            ics, icon, kids, meetings, orgs, outlook, palette, peek, popupmenu,
             prayer, prayersconnect, providers, render, routines, settings_ui, sounds, themes,
             timetext, toast, tray, vault, widgets, win32util,
         )
